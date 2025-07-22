@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytemuck = "1.23.1"
-thiserror = "2.0.12"
+bytemuck = "1.23"
+thiserror = "2.0"
 tracing = { version = "0.1" }
 wgpu = { version = "26.0", default-features = false, features = [
     "wgsl",
@@ -14,7 +14,7 @@ wgpu = { version = "26.0", default-features = false, features = [
 ] }
 
 [build-dependencies]
-wgsl_to_wgpu = "0.15.0"
+wgsl_to_wgpu = "0.15"
 
 
 [dev-dependencies]
@@ -29,5 +29,5 @@ wgpu = { version = "26.0", default-features = false, features = [
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eyre = "0.6"
 smol = "2.0"
-float-ord = "0.3.2"
-primes = "0.4.0"
+float-ord = "0.3"
+primes = "0.4"
