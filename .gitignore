@@ -1,0 +1,5 @@
+/.direnv
+/target
+/.envrc
+/Cargo.lock
+/.vscode
