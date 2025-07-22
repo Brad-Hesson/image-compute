@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use wgpu::{BufferUsages, ComputePass, ComputePipeline, Device, Queue, util::align_to};
+use wgpu::{BufferUsages, ComputePass, ComputePipeline, Device, util::align_to};
 
 use crate::{buffers::StorageBuffer, shaders::transform};
 
@@ -13,24 +13,31 @@ pub struct Image {
     bind_group: transform::bind_groups::BindGroup0,
 }
 impl Image {
-    pub fn new(device: &Device, label: Option<&str>, size: [u32; 2]) -> Self {
+    pub fn new(
+        device: &Device,
+        label: Option<&str>,
+        size: [u32; 2],
+        init_fn: impl FnOnce(&mut [f32]),
+    ) -> Self {
         let size_buffer_label = label.map(|name| format!("{name}_size_buffer"));
-        let size_buffer = buffers::StorageBuffer::new_as(
+        let size_buffer = buffers::StorageBuffer::new(
             &device,
             size_buffer_label.as_deref(),
-            &size,
             BufferUsages::UNIFORM,
+            2,
+            |buf| buf.copy_from_slice(&size),
         );
         let data_buffer_label = label.map(|name| format!("{name}_data_buffer"));
         let data_buffer = buffers::StorageBuffer::new(
             &device,
             data_buffer_label.as_deref(),
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             size.iter().map(|v| *v as usize).product(),
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            init_fn,
         );
         let bindings = transform::bind_groups::BindGroupLayout0 {
-            size_out: size_buffer.as_entire_buffer_binding(),
-            data_out: data_buffer.as_entire_buffer_binding(),
+            size_out: size_buffer.inner.as_entire_buffer_binding(),
+            data_out: data_buffer.inner.as_entire_buffer_binding(),
         };
         let bind_group = transform::bind_groups::BindGroup0::from_bindings(&device, bindings);
         Self {
@@ -39,38 +46,6 @@ impl Image {
             bind_group,
             size,
         }
-    }
-    pub fn new_as(device: &Device, label: Option<&str>, width: u32, data: &[f32]) -> Self {
-        assert_eq!(data.len() % width as usize, 0);
-        let size = [width, (data.len() as usize / width as usize) as u32];
-        let size_buffer_label = label.map(|name| format!("{name}_size_buffer"));
-        let size_buffer = buffers::StorageBuffer::new_as(
-            &device,
-            size_buffer_label.as_deref(),
-            &size,
-            BufferUsages::UNIFORM,
-        );
-        let data_buffer_label = label.map(|name| format!("{name}_data_buffer"));
-        let data_buffer = buffers::StorageBuffer::new_as(
-            &device,
-            data_buffer_label.as_deref(),
-            data,
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-        );
-        let bindings = transform::bind_groups::BindGroupLayout0 {
-            size_out: size_buffer.as_entire_buffer_binding(),
-            data_out: data_buffer.as_entire_buffer_binding(),
-        };
-        let bind_group = transform::bind_groups::BindGroup0::from_bindings(&device, bindings);
-        Self {
-            size_buffer,
-            data_buffer,
-            bind_group,
-            size,
-        }
-    }
-    pub fn write(&self, queue: &Queue, offset: usize, data: &[f32]) {
-        self.data_buffer.write(queue, offset, data);
     }
     fn set_0(&self, pass: &mut ComputePass) {
         self.bind_group.set(pass);
@@ -127,7 +102,9 @@ impl Transformer {
             image_a,
             image_b,
             image_out,
-        )
+        )?;
+        pass.pop_debug_group();
+        Ok(())
     }
     pub fn subtract(
         &self,
@@ -195,9 +172,9 @@ impl Transformer {
         let mut remaining = image.size.iter().product::<u32>();
         let wg_size = transform::compute::SUM_WORKGROUP_SIZE[0];
         loop {
-            let num_worgroups = align_to(remaining, wg_size) / wg_size;
-            pass.dispatch_workgroups(num_worgroups, 1, 1);
-            remaining = num_worgroups;
+            let num_workgroups = align_to(remaining, wg_size) / wg_size;
+            pass.dispatch_workgroups(num_workgroups, 1, 1);
+            remaining = num_workgroups;
             if remaining == 1 {
                 break;
             }
@@ -377,8 +354,6 @@ pub enum TransformError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
-
     use eyre::{Context, Result, bail};
     use primes::PrimeSet;
     use tracing::info;
@@ -389,49 +364,50 @@ mod tests {
         Queue, RequestAdapterOptions, wgt::QuerySetDescriptor,
     };
 
-    use crate::shaders::transform;
-
     use super::*;
 
     #[test]
     fn sum_shader() -> Result<()> {
         let (_instance, _adapter, device, queue) = init().context("Init failed")?;
-        unsafe { device.start_graphics_debugger_capture() };
         let transformer = Transformer::new(&device);
 
         const WIDTH: usize = 1024;
         const HEIGHT: usize = 1024;
-        let mut data = vec![f32::NAN; WIDTH * HEIGHT];
-        data[0] = 1.;
-        data[1] = 2.;
-        data[2] = 3.;
-        data[3] = 4.;
-        data[4] = 5.;
-        data[5] = 6.;
-        data[6] = 7.;
-        data[7] = 8.;
-        data[8] = 9.;
-        data[9] = 10.;
-        data[WIDTH + 0] = 0.;
-        data[WIDTH + 1] = 1.;
-        data[WIDTH + 2] = 2.;
-        data[WIDTH + 3] = 3.;
-        data[WIDTH + 4] = 4.;
-        data[WIDTH + 5] = 5.;
-        data[WIDTH + 6] = 6.;
-        data[WIDTH + 7] = 7.;
-        data[WIDTH + 8] = 8.;
-        data[WIDTH + 9] = 9.;
-        let original = Image::new_as(&device, Some("original_image"), WIDTH as _, &data);
-        let image = Image::new_as(&device, Some("working_image"), WIDTH as _, &data);
-        let scratch = Image::new(&device, Some("scratch_image"), image.size);
-        let scratch2 = Image::new(&device, Some("scratch2_image"), image.size);
-        let scratch3 = Image::new(&device, Some("scratch3_image"), image.size);
+        const SIZE: [u32; 2] = [WIDTH as _, HEIGHT as _];
+        let init_data = |data: &mut [f32]| {
+            data.fill(f32::NAN);
+            data[0] = 1.;
+            data[1] = 2.;
+            data[2] = 3.;
+            data[3] = 4.;
+            data[4] = 5.;
+            data[5] = 6.;
+            data[6] = 7.;
+            data[7] = 8.;
+            data[8] = 9.;
+            data[9] = 10.;
+            data[WIDTH + 0] = 0.;
+            data[WIDTH + 1] = 1.;
+            data[WIDTH + 2] = 2.;
+            data[WIDTH + 3] = 3.;
+            data[WIDTH + 4] = 4.;
+            data[WIDTH + 5] = 5.;
+            data[WIDTH + 6] = 6.;
+            data[WIDTH + 7] = 7.;
+            data[WIDTH + 8] = 8.;
+            data[WIDTH + 9] = 9.;
+        };
+        let original = Image::new(&device, Some("original_image"), SIZE, init_data);
+        let image = Image::new(&device, Some("working_image"), SIZE, init_data);
+        let scratch = Image::new(&device, Some("scratch_image"), SIZE, |_| {});
+        let scratch2 = Image::new(&device, Some("scratch2_image"), SIZE, |_| {});
+        let scratch3 = Image::new(&device, Some("scratch3_image"), SIZE, |_| {});
         let query_set_buffer = StorageBuffer::<u64>::new(
             &device,
             Some("query_set_buffer"),
-            2,
             BufferUsages::QUERY_RESOLVE | BufferUsages::COPY_SRC,
+            2,
+            |_| {},
         );
         let query_set = device.create_query_set(&QuerySetDescriptor {
             count: 2,
@@ -439,6 +415,7 @@ mod tests {
             label: None,
         });
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
+        unsafe { device.start_graphics_debugger_capture() };
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("test_name"),
         });
@@ -471,37 +448,18 @@ mod tests {
             pass.pop_debug_group();
             transformer.subtract_average(&mut pass, &image, &scratch3)?;
         }
-        encoder.resolve_query_set(&query_set, 0..2, &query_set_buffer.0, 0);
+        encoder.resolve_query_set(&query_set, 0..2, &query_set_buffer.inner, 0);
         device.poll(PollType::WaitForSubmissionIndex(
             queue.submit([encoder.finish()]),
         ))?;
-
-        static IMAGE: OnceLock<Vec<f32>> = OnceLock::new();
-        wgpu::util::DownloadBuffer::read_buffer(
-            &device,
-            &queue,
-            &image.data_buffer.slice(..),
-            |buf| {
-                IMAGE
-                    .set(bytemuck::cast_slice(&buf.unwrap()).to_vec())
-                    .unwrap();
-            },
-        );
-        static TIMESTAMPS: OnceLock<Vec<u64>> = OnceLock::new();
-        wgpu::util::DownloadBuffer::read_buffer(
-            &device,
-            &queue,
-            &query_set_buffer.slice(..),
-            |buf| {
-                TIMESTAMPS
-                    .set(bytemuck::cast_slice(&buf.unwrap()).to_vec())
-                    .unwrap();
-            },
-        );
-        device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
         unsafe { device.stop_graphics_debugger_capture() };
-        println!("{:?}", &IMAGE.get().unwrap()[..100]);
-        let times = TIMESTAMPS.get().unwrap();
+
+        let image_download = image.data_buffer.queue_download(&device, &queue, ..);
+        let timestamps_download = query_set_buffer.queue_download(&device, &queue, ..);
+        device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
+
+        println!("{:?}", &image_download.get().unwrap()[..100]);
+        let times = timestamps_download.get().unwrap();
         println!("{:?} microseconds", (times[1] - times[0]) as f32 / 1000.);
         dbg!(queue.get_timestamp_period());
         Ok(())
@@ -510,22 +468,31 @@ mod tests {
     #[test]
     fn primes_data_race() -> Result<()> {
         let (_instance, _adapter, device, queue) = init().context("Init failed")?;
-        unsafe { device.start_graphics_debugger_capture() };
-        let mul_pipeline = transform::compute::create_multiply_pipeline(&device);
+        let transformer = Transformer::new(&device);
 
         const WIDTH: usize = 235;
         const HEIGHT: usize = 234;
+        const SIZE: [u32; 2] = [WIDTH as _, HEIGHT as _];
         let primes_int = primes::Sieve::new()
             .iter()
             .take(WIDTH * HEIGHT)
             .collect::<Vec<_>>();
-        let primes = primes_int.iter().map(|p| *p as f32).collect::<Vec<_>>();
-        info!("Final prime: {:?}", primes.last());
-        let image_a = Image::new_as(&device, Some("image_a"), WIDTH as _, &primes);
-        let image_b = Image::new_as(&device, Some("image_b"), WIDTH as _, &primes);
+        let init_data = |data: &mut [f32]| {
+            primes_int
+                .iter()
+                .zip(data.iter_mut())
+                .for_each(|(input, out)| {
+                    *out = *input as f32;
+                })
+        };
+
+        info!("Final prime: {:?}", primes_int.last());
+        let image_a = Image::new(&device, Some("image_a"), SIZE, init_data);
+        let image_b = Image::new(&device, Some("image_b"), SIZE, init_data);
 
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
 
+        unsafe { device.start_graphics_debugger_capture() };
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("test_name"),
         });
@@ -534,34 +501,21 @@ mod tests {
                 label: Some("Test Compute Pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&mul_pipeline);
-            image_a.set_1(&mut pass);
-            image_b.set_2(&mut pass);
-            image_b.set_0(&mut pass);
-            pass.dispatch_workgroups(image_a.size[0] / 16 + 1, image_a.size[1] / 16 + 1, 1);
+            transformer.multiply(&mut pass, &image_a, &image_b, &image_b)?;
         }
         device.poll(PollType::WaitForSubmissionIndex(
             queue.submit([encoder.finish()]),
         ))?;
-
-        static CELL: OnceLock<Vec<f32>> = OnceLock::new();
-        wgpu::util::DownloadBuffer::read_buffer(
-            &device,
-            &queue,
-            &image_b.data_buffer.slice(..),
-            |buf| {
-                let buf = buf.unwrap();
-                CELL.set(bytemuck::cast_slice(&buf).to_vec()).unwrap();
-            },
-        );
+        unsafe { device.stop_graphics_debugger_capture() };
+        let buffer_download = image_b.data_buffer.queue_download(&device, &queue, ..);
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
-        let mismatches = CELL
+        let mismatches = buffer_download
             .get()
             .unwrap()
             .into_iter()
-            .zip(primes)
+            .zip(&primes_int)
             .enumerate()
-            .filter(|(_, (a, b))| (a.sqrt() - b).abs() > f32::EPSILON)
+            .filter(|(_, (a, b))| (a.sqrt() - **b as f32).abs() > f32::EPSILON)
             .map(|(i, (a, _))| {
                 (
                     i,
@@ -573,7 +527,6 @@ mod tests {
             })
             .inspect(|(i, v)| println!("{i}: {v:?}"))
             .collect::<Vec<_>>();
-        unsafe { device.stop_graphics_debugger_capture() };
         if !mismatches.is_empty() {
             bail!("Failed with {} mismatches", mismatches.len());
         }
@@ -600,9 +553,3 @@ mod tests {
         Ok((instance, adapter, dev, queue))
     }
 }
-
-// gen xs
-// gen ys
-// mul/div
-// sum
-// sub/add
