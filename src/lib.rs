@@ -169,15 +169,12 @@ impl Transformer {
         image.set_0(pass);
         image.set_1(pass);
         image.set_2(pass);
-        let mut remaining = image.size.iter().product::<u32>();
         let wg_size = transform::compute::SUM_WORKGROUP_SIZE[0];
-        loop {
-            let num_workgroups = align_to(remaining, wg_size) / wg_size;
+        let mut remaining_data = image.size.iter().product::<u32>();
+        while remaining_data > 1 {
+            let num_workgroups = align_to(remaining_data, wg_size) / wg_size;
             pass.dispatch_workgroups(num_workgroups, 1, 1);
-            remaining = num_workgroups;
-            if remaining == 1 {
-                break;
-            }
+            remaining_data = num_workgroups;
         }
         pass.pop_debug_group();
     }
