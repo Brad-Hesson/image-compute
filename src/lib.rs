@@ -3,7 +3,7 @@ use wgpu::{BufferUsages, ComputePass, ComputePipeline, Device, util::align_to};
 
 use crate::{
     buffers::StorageBuffer,
-    shaders::{arity1, arity2, unary},
+    shaders::{arity1, arity2, unary, plane_fit},
 };
 
 mod buffers;
@@ -52,10 +52,10 @@ impl Image {
             size,
         }
     }
-    fn set_arg_out(&self, pass: &mut ComputePass) {
+    pub fn set_arg_out(&self, pass: &mut ComputePass) {
         self.bind_group.set(pass);
     }
-    fn set_arg_a(&self, pass: &mut ComputePass) {
+    pub fn set_arg_a(&self, pass: &mut ComputePass) {
         unsafe { std::mem::transmute::<_, &arity2::bind_groups::BindGroup1>(&self.bind_group) }
             .set(pass);
     }
@@ -352,6 +352,71 @@ impl Transformer {
     }
 }
 
+pub struct PlaneFitter{
+    first: ComputePipeline,
+    second_fourth: ComputePipeline,
+    third: ComputePipeline,
+    third_point_five: ComputePipeline,
+    fifth: ComputePipeline,
+    buffers: [StorageBuffer<f32>; 6],
+    bg: plane_fit::bind_groups::BindGroup2,
+    size: [u32; 2]
+}
+impl PlaneFitter{
+    pub fn new(device: &Device, size: [u32; 2]) -> Self {
+        let buffers = std::iter::from_fn(|| Some(StorageBuffer::new(
+                device,
+                None,
+                BufferUsages::STORAGE,
+                size[0] as usize * size[1] as usize,
+                |_|{},
+            ))).take(6).collect::<Vec<_>>();
+        Self {
+            first: plane_fit::compute::create_first_pipeline(device),
+            second_fourth: plane_fit::compute::create_second_fourth_pipeline(device),
+            third: plane_fit::compute::create_third_pipeline(device),
+            third_point_five: plane_fit::compute::create_third_point_five_pipeline(device),
+            fifth: plane_fit::compute::create_fifth_pipeline(device),
+            bg: plane_fit::bind_groups::BindGroup2::from_bindings(
+                &device,
+                plane_fit::bind_groups::BindGroupLayout2 {
+                    xs: buffers[0].inner.as_entire_buffer_binding(),
+                    ys: buffers[1].inner.as_entire_buffer_binding(),
+                    image_sum__xzs: buffers[2].inner.as_entire_buffer_binding(),
+                    ones_sum__x2s: buffers[3].inner.as_entire_buffer_binding(),
+                    xs_sum__yzs: buffers[4].inner.as_entire_buffer_binding(),
+                    ys_sum__y2s: buffers[5].inner.as_entire_buffer_binding(),
+                },
+            ),
+            buffers: buffers.try_into().unwrap(),
+            size
+        }
+    }
+    pub fn run(&self, pass: &mut ComputePass){
+        self.bg.set(pass);
+        pass.set_pipeline(&self.first);
+        dispatch_linear(pass, self.size, plane_fit::compute::FIRST_WORKGROUP_SIZE);
+        pass.set_pipeline(&self.second_fourth);
+        dispatch_reduction(pass, self.size, plane_fit::compute::SECOND_FOURTH_WORKGROUP_SIZE);
+        pass.set_pipeline(&self.third);
+        dispatch_linear(pass, self.size, plane_fit::compute::THIRD_WORKGROUP_SIZE);
+        pass.set_pipeline(&self.third_point_five);
+        dispatch_linear(pass, self.size, plane_fit::compute::THIRD_POINT_FIVE_WORKGROUP_SIZE);
+        pass.set_pipeline(&self.second_fourth);
+        dispatch_reduction(pass, self.size, plane_fit::compute::SECOND_FOURTH_WORKGROUP_SIZE);
+        pass.set_pipeline(&self.fifth);
+        dispatch_linear(pass, self.size, plane_fit::compute::FIFTH_WORKGROUP_SIZE);
+    }
+}
+
+fn dispatch_linear(pass: &mut ComputePass, size: [u32; 2], wg_size: [u32; 3]) {
+    pass.dispatch_workgroups(
+        align_to(size[0] * size[1], wg_size[0]) / wg_size[0],
+        1,
+        1
+    );
+}
+
 fn dispatch_tiles(pass: &mut ComputePass, size: [u32; 2], wg_size: [u32; 3]) {
     pass.dispatch_workgroups(
         align_to(size[0], wg_size[0]) / wg_size[0],
@@ -408,10 +473,11 @@ mod tests {
     fn sum_shader() -> Result<()> {
         let (_instance, _adapter, device, queue) = init().context("Init failed")?;
         let transformer = Transformer::new(&device);
-
+        
         const WIDTH: usize = 1024;
         const HEIGHT: usize = 1024;
         const SIZE: [u32; 2] = [WIDTH as _, HEIGHT as _];
+        let plane_fitter = PlaneFitter::new(&device, SIZE);
         let init_data = |data: &mut [f32]| {
             data.fill(f32::NAN);
             data[0] = 1.;
@@ -476,7 +542,7 @@ mod tests {
                     end_of_pass_write_index: Some(1),
                 }),
             });
-            if true {
+            if false {
                 // copy image data
                 transformer.copy(&mut pass, &original, &z)?;
                 // subtract average
@@ -509,27 +575,9 @@ mod tests {
                 transformer.multiply(&mut pass, &curve_y, &y2s, &scratch)?;
                 transformer.subtract(&mut pass, &z, &scratch, &z)?;
             } else {
-                // copy image data
-                transformer.copy(&mut pass, &original, &z)?;
-                // subtract average
-                transformer.subtract_average(&mut pass, &z, &avg)?;
-                // subtract x slope
-                transformer.compute_x_slope(&mut pass, &original, &scratch, &scratch2)?;
-                pass.push_debug_group("subtract x slope");
-                transformer.broadcast(&mut pass, &scratch)?; // S = A's
-                transformer.xs_like(&mut pass, &original, &scratch2)?; // S2 = x
-                transformer.multiply(&mut pass, &scratch, &scratch2, &scratch2)?; // S2 = plane
-                transformer.subtract(&mut pass, &z, &scratch2, &z)?;
-                pass.pop_debug_group();
-                // subtract y slope
-                transformer.compute_y_slope(&mut pass, &original, &scratch, &scratch2)?;
-                pass.push_debug_group("subtract y slope");
-                transformer.broadcast(&mut pass, &scratch)?; // S = A's
-                transformer.ys_like(&mut pass, &original, &scratch2)?; // S2 = y
-                transformer.multiply(&mut pass, &scratch, &scratch2, &scratch2)?; // S2 = plane
-                transformer.subtract(&mut pass, &z, &scratch2, &z)?;
-                pass.pop_debug_group();
-                transformer.subtract_average(&mut pass, &z, &scratch3)?;
+                original.set_arg_out(&mut pass);
+                z.set_arg_a(&mut pass);
+                plane_fitter.run(&mut pass);
             }
         }
         encoder.resolve_query_set(&query_set, 0..2, &query_set_buffer.inner, 0);
@@ -640,8 +688,8 @@ mod tests {
 
     #[test]
     fn cpu_based() {
-        const WIDTH: usize = 1024;
-        const HEIGHT: usize = 1024;
+        const WIDTH: usize = 256;
+        const HEIGHT: usize = 256;
         let mut data = vec![f32::NAN; WIDTH * HEIGHT].into_boxed_slice();
         // for i in 0..data.len() {
         //     data[i] = random();
@@ -670,9 +718,9 @@ mod tests {
         let mut clock = SimpleHighPrecisionClock::new(100_000_000);
         let mut times = vec![];
         let mut data_out: Box<[f32]> = Box::new([]);
-        for i in 0..100 {
+        for i in 0..1000 {
             let start = clock.now();
-            data_out = std::hint::black_box(inside_loop(&data));
+            data_out = std::hint::black_box(inside_loop(&data, WIDTH));
             let end = clock.now();
             times.push(end - start);
             if i == 10 {
@@ -687,8 +735,7 @@ mod tests {
         );
     }
 
-    fn inside_loop(data: &[f32]) -> Box<[f32]> {
-        const WIDTH: usize = 1024;
+    fn inside_loop(data: &[f32], width: usize) -> Box<[f32]> {
         let mut zs = Vec::from(data).into_boxed_slice();
         let mut xs = Box::new_uninit_slice(zs.len());
         let mut ys = Box::new_uninit_slice(zs.len());
@@ -696,41 +743,39 @@ mod tests {
         let mut zs_sum = 0.;
         for (i, z) in zs.iter().enumerate() {
             if z.is_nan() {
-                xs[i].write(0.);
-                ys[i].write(0.);
+                xs[i].write(f32::NAN);
+                ys[i].write(f32::NAN);
             } else {
                 count += 1.;
                 zs_sum += z;
-                xs[i].write((i % WIDTH) as f32);
-                ys[i].write((i / WIDTH) as f32);
+                xs[i].write((i % width) as f32);
+                ys[i].write((i / width) as f32);
             }
         }
         let (mut xs, mut ys) = unsafe { (xs.assume_init(), ys.assume_init()) };
         let xs_avg = sum_nan_aware(&xs) / count;
         let ys_avg = sum_nan_aware(&ys) / count;
         let zs_avg = zs_sum / count;
-        xs.iter_mut().for_each(|x| *x -= xs_avg);
-        ys.iter_mut().for_each(|y| *y -= ys_avg);
         zs.iter_mut().for_each(|x| *x -= zs_avg);
         let mut xzs = Box::new_uninit_slice(zs.len());
         let mut x2s = Box::new_uninit_slice(zs.len());
         let mut yzs = Box::new_uninit_slice(zs.len());
         let mut y2s = Box::new_uninit_slice(zs.len());
         for (i, z) in zs.iter().enumerate() {
-            xzs[i].write(z * xs[i]);
-            x2s[i].write(xs[i] * xs[i]);
-            yzs[i].write(z * ys[i]);
-            y2s[i].write(ys[i] * ys[i]);
+            let x = (i % width) as f32;
+            let y = (i / width) as f32;
+            xzs[i].write(z * (x - xs_avg));
+            x2s[i].write((x - xs_avg) * (x - xs_avg));
+            yzs[i].write(z * (y - ys_avg));
+            y2s[i].write((y - ys_avg) * (y - ys_avg));
         }
         let (xzs, x2s) = unsafe { (xzs.assume_init(), x2s.assume_init()) };
         let (yzs, y2s) = unsafe { (yzs.assume_init(), y2s.assume_init()) };
         let x_slope = sum_nan_aware(&xzs) / sum_nan_aware(&x2s);
         let y_slope = sum_nan_aware(&yzs) / sum_nan_aware(&y2s);
-        dbg!(&x_slope);
-        dbg!(&y_slope);
         for (i, z) in zs.iter_mut().enumerate() {
-            let x = (i % WIDTH) as f32;
-            let y = (i / WIDTH) as f32;
+            let x = (i % width) as f32;
+            let y = (i / width) as f32;
             *z = *z - x_slope * (x - xs_avg) - y_slope * (y - ys_avg);
         }
         zs

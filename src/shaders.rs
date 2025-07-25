@@ -12,3 +12,8 @@ pub mod arity2 {
     #![allow(dead_code)]
     include!(concat!(env!("OUT_DIR"), "/arity2.rs"));
 }
+
+pub mod plane_fit {
+    #![allow(dead_code)]
+    include!(concat!(env!("OUT_DIR"), "/plane_fit.rs"));
+}

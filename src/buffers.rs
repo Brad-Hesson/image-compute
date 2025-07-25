@@ -8,6 +8,7 @@ use std::{
 use bytemuck::{AnyBitPattern, NoUninit};
 use wgpu::{Buffer, BufferAddress, BufferDescriptor, BufferUsages, Device, Queue};
 
+#[derive(Debug)]
 pub struct StorageBuffer<T: Clone + NoUninit + AnyBitPattern> {
     pub inner: Buffer,
     pd: PhantomData<T>,
