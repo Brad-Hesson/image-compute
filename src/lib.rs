@@ -387,14 +387,19 @@ pub enum TransformError {
 
 #[cfg(test)]
 mod tests {
+    use std::{mem::MaybeUninit, sync::OnceLock};
+
     use eyre::{Context, Result, bail};
+    use high_precision_clock::SimpleHighPrecisionClock;
     use primes::PrimeSet;
+    use rand::random;
+    use rayon::iter::{IndexedParallelIterator as _, IntoParallelRefIterator, ParallelIterator};
     use tracing::info;
     use tracing_subscriber::EnvFilter;
     use wgpu::{
         Adapter, CommandEncoderDescriptor, ComputePassDescriptor, ComputePassTimestampWrites,
         Device, DeviceDescriptor, FeaturesWGPU, FeaturesWebGPU, Instance, PollType, QueryType,
-        Queue, RequestAdapterOptions, wgt::QuerySetDescriptor,
+        Queue, RequestAdapterOptions, naga::valid::WidthError, wgt::QuerySetDescriptor,
     };
 
     use super::*;
@@ -631,5 +636,108 @@ mod tests {
         }))
         .context("Device request failed")?;
         Ok((instance, adapter, dev, queue))
+    }
+
+    #[test]
+    fn cpu_based() {
+        const WIDTH: usize = 1024;
+        const HEIGHT: usize = 1024;
+        let mut data = vec![f32::NAN; WIDTH * HEIGHT].into_boxed_slice();
+        // for i in 0..data.len() {
+        //     data[i] = random();
+        // }
+        data[0] = 1.;
+        data[1] = 2.;
+        data[2] = 3.;
+        data[3] = 4.;
+        data[4] = 5.;
+        data[5] = 6.;
+        data[6] = 7.;
+        data[7] = 8.;
+        data[8] = 9.;
+        data[9] = 10.;
+        data[WIDTH + 0] = 0.;
+        data[WIDTH + 1] = 1.;
+        data[WIDTH + 2] = 2.;
+        data[WIDTH + 3] = 3.;
+        data[WIDTH + 4] = 4.;
+        data[WIDTH + 5] = 5.;
+        data[WIDTH + 6] = 6.;
+        data[WIDTH + 7] = 7.;
+        data[WIDTH + 8] = 8.;
+        data[WIDTH + 9] = 9.;
+
+        let mut clock = SimpleHighPrecisionClock::new(100_000_000);
+        let mut times = vec![];
+        let mut data_out: Box<[f32]> = Box::new([]);
+        for i in 0..100 {
+            let start = clock.now();
+            data_out = std::hint::black_box(inside_loop(&data));
+            let end = clock.now();
+            times.push(end - start);
+            if i == 10 {
+                clock.calibrate();
+            }
+        }
+        println!("{:?}", &data_out[..10]);
+        println!("{:?}", &data_out[WIDTH..][..10]);
+        println!(
+            "{:?} microseconds",
+            times.iter().sum::<u64>() as f64 / times.len() as f64 / 1000.0
+        );
+    }
+
+    fn inside_loop(data: &[f32]) -> Box<[f32]> {
+        const WIDTH: usize = 1024;
+        let mut zs = Vec::from(data).into_boxed_slice();
+        let mut xs = Box::new_uninit_slice(zs.len());
+        let mut ys = Box::new_uninit_slice(zs.len());
+        let mut count = 0.;
+        let mut zs_sum = 0.;
+        for (i, z) in zs.iter().enumerate() {
+            if z.is_nan() {
+                xs[i].write(0.);
+                ys[i].write(0.);
+            } else {
+                count += 1.;
+                zs_sum += z;
+                xs[i].write((i % WIDTH) as f32);
+                ys[i].write((i / WIDTH) as f32);
+            }
+        }
+        let (mut xs, mut ys) = unsafe { (xs.assume_init(), ys.assume_init()) };
+        let xs_avg = sum_nan_aware(&xs) / count;
+        let ys_avg = sum_nan_aware(&ys) / count;
+        let zs_avg = zs_sum / count;
+        xs.iter_mut().for_each(|x| *x -= xs_avg);
+        ys.iter_mut().for_each(|y| *y -= ys_avg);
+        zs.iter_mut().for_each(|x| *x -= zs_avg);
+        let mut xzs = Box::new_uninit_slice(zs.len());
+        let mut x2s = Box::new_uninit_slice(zs.len());
+        let mut yzs = Box::new_uninit_slice(zs.len());
+        let mut y2s = Box::new_uninit_slice(zs.len());
+        for (i, z) in zs.iter().enumerate() {
+            xzs[i].write(z * xs[i]);
+            x2s[i].write(xs[i] * xs[i]);
+            yzs[i].write(z * ys[i]);
+            y2s[i].write(ys[i] * ys[i]);
+        }
+        let (xzs, x2s) = unsafe { (xzs.assume_init(), x2s.assume_init()) };
+        let (yzs, y2s) = unsafe { (yzs.assume_init(), y2s.assume_init()) };
+        let x_slope = sum_nan_aware(&xzs) / sum_nan_aware(&x2s);
+        let y_slope = sum_nan_aware(&yzs) / sum_nan_aware(&y2s);
+        dbg!(&x_slope);
+        dbg!(&y_slope);
+        for (i, z) in zs.iter_mut().enumerate() {
+            let x = (i % WIDTH) as f32;
+            let y = (i / WIDTH) as f32;
+            *z = *z - x_slope * (x - xs_avg) - y_slope * (y - ys_avg);
+        }
+        zs
+    }
+
+    #[inline(always)]
+    fn sum_nan_aware(data: &[f32]) -> f32 {
+        data.iter().filter(|v| !v.is_nan()).sum()
     }
 }
