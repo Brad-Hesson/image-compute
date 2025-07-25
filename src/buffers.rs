@@ -5,14 +5,14 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use bytemuck::AnyBitPattern;
+use bytemuck::{AnyBitPattern, NoUninit};
 use wgpu::{Buffer, BufferAddress, BufferDescriptor, BufferUsages, Device, Queue};
 
-pub struct StorageBuffer<T: Clone + bytemuck::NoUninit + AnyBitPattern> {
+pub struct StorageBuffer<T: Clone + NoUninit + AnyBitPattern> {
     pub inner: Buffer,
     pd: PhantomData<T>,
 }
-impl<T: Clone + bytemuck::NoUninit + AnyBitPattern> StorageBuffer<T> {
+impl<T: Clone + NoUninit + AnyBitPattern> StorageBuffer<T> {
     pub fn new(
         device: &Device,
         label: Option<&str>,
