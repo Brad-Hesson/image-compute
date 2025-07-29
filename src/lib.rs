@@ -3,7 +3,7 @@ use wgpu::{BufferUsages, ComputePass, ComputePipeline, Device, util::align_to};
 
 use crate::{
     buffers::StorageBuffer,
-    shaders::{arity1, arity2, unary, plane_fit},
+    shaders::{arity1, arity2, plane_fit, unary},
 };
 
 mod buffers;
@@ -12,7 +12,7 @@ mod shaders;
 pub struct Image {
     pub size: [u32; 2],
     size_buffer: StorageBuffer<u32>,
-    data_buffer: StorageBuffer<f32>,
+    data_buffer: StorageBuffer<f64>,
     bind_group: arity2::bind_groups::BindGroup0,
 }
 impl Image {
@@ -20,7 +20,7 @@ impl Image {
         device: &Device,
         label: Option<&str>,
         size: [u32; 2],
-        init_fn: impl FnOnce(&mut [f32]),
+        init_fn: impl FnOnce(&mut [f64]),
     ) -> Self {
         let size_buffer_label = label.map(|name| format!("{name}_size_buffer"));
         let size_buffer = buffers::StorageBuffer::new(
@@ -352,25 +352,30 @@ impl Transformer {
     }
 }
 
-pub struct PlaneFitter{
+pub struct PlaneFitter {
     first: ComputePipeline,
     second_fourth: ComputePipeline,
     third: ComputePipeline,
     third_point_five: ComputePipeline,
     fifth: ComputePipeline,
-    buffers: [StorageBuffer<f32>; 6],
+    buffers: [StorageBuffer<f64>; 8],
     bg: plane_fit::bind_groups::BindGroup2,
-    size: [u32; 2]
+    size: [u32; 2],
 }
-impl PlaneFitter{
+impl PlaneFitter {
     pub fn new(device: &Device, size: [u32; 2]) -> Self {
-        let buffers = std::iter::from_fn(|| Some(StorageBuffer::new(
-                device,
-                None,
-                BufferUsages::STORAGE,
-                size[0] as usize * size[1] as usize,
-                |_|{},
-            ))).take(6).collect::<Vec<_>>();
+        let buffers = (0..)
+            .map(|i| {
+                StorageBuffer::new(
+                    device,
+                    Some(&format!("scratch_buffer_{i}")),
+                    BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+                    size[0] as usize * size[1] as usize,
+                    |_| {},
+                )
+            })
+            .take(8)
+            .collect::<Vec<_>>();
         Self {
             first: plane_fit::compute::create_first_pipeline(device),
             second_fourth: plane_fit::compute::create_second_fourth_pipeline(device),
@@ -386,35 +391,45 @@ impl PlaneFitter{
                     ones_sum__x2s: buffers[3].inner.as_entire_buffer_binding(),
                     xs_sum__yzs: buffers[4].inner.as_entire_buffer_binding(),
                     ys_sum__y2s: buffers[5].inner.as_entire_buffer_binding(),
+                    debug: buffers[6].inner.as_entire_buffer_binding(),
+                    meta_out: buffers[7].inner.as_entire_buffer_binding(),
                 },
             ),
             buffers: buffers.try_into().unwrap(),
-            size
+            size,
         }
     }
-    pub fn run(&self, pass: &mut ComputePass){
+    pub fn run(&self, pass: &mut ComputePass) {
         self.bg.set(pass);
         pass.set_pipeline(&self.first);
         dispatch_linear(pass, self.size, plane_fit::compute::FIRST_WORKGROUP_SIZE);
         pass.set_pipeline(&self.second_fourth);
-        dispatch_reduction(pass, self.size, plane_fit::compute::SECOND_FOURTH_WORKGROUP_SIZE);
+        dispatch_reduction(
+            pass,
+            self.size,
+            plane_fit::compute::SECOND_FOURTH_WORKGROUP_SIZE,
+        );
         pass.set_pipeline(&self.third);
         dispatch_linear(pass, self.size, plane_fit::compute::THIRD_WORKGROUP_SIZE);
         pass.set_pipeline(&self.third_point_five);
-        dispatch_linear(pass, self.size, plane_fit::compute::THIRD_POINT_FIVE_WORKGROUP_SIZE);
+        dispatch_linear(
+            pass,
+            self.size,
+            plane_fit::compute::THIRD_POINT_FIVE_WORKGROUP_SIZE,
+        );
         pass.set_pipeline(&self.second_fourth);
-        dispatch_reduction(pass, self.size, plane_fit::compute::SECOND_FOURTH_WORKGROUP_SIZE);
+        dispatch_reduction(
+            pass,
+            self.size,
+            plane_fit::compute::SECOND_FOURTH_WORKGROUP_SIZE,
+        );
         pass.set_pipeline(&self.fifth);
         dispatch_linear(pass, self.size, plane_fit::compute::FIFTH_WORKGROUP_SIZE);
     }
 }
 
 fn dispatch_linear(pass: &mut ComputePass, size: [u32; 2], wg_size: [u32; 3]) {
-    pass.dispatch_workgroups(
-        align_to(size[0] * size[1], wg_size[0]) / wg_size[0],
-        1,
-        1
-    );
+    pass.dispatch_workgroups(align_to(size[0] * size[1], wg_size[0]) / wg_size[0], 1, 1);
 }
 
 fn dispatch_tiles(pass: &mut ComputePass, size: [u32; 2], wg_size: [u32; 3]) {
@@ -452,19 +467,15 @@ pub enum TransformError {
 
 #[cfg(test)]
 mod tests {
-    use std::{mem::MaybeUninit, sync::OnceLock};
-
     use eyre::{Context, Result, bail};
     use high_precision_clock::SimpleHighPrecisionClock;
     use primes::PrimeSet;
-    use rand::random;
-    use rayon::iter::{IndexedParallelIterator as _, IntoParallelRefIterator, ParallelIterator};
     use tracing::info;
     use tracing_subscriber::EnvFilter;
     use wgpu::{
         Adapter, CommandEncoderDescriptor, ComputePassDescriptor, ComputePassTimestampWrites,
         Device, DeviceDescriptor, FeaturesWGPU, FeaturesWebGPU, Instance, PollType, QueryType,
-        Queue, RequestAdapterOptions, naga::valid::WidthError, wgt::QuerySetDescriptor,
+        Queue, RequestAdapterOptions, wgt::QuerySetDescriptor,
     };
 
     use super::*;
@@ -473,33 +484,21 @@ mod tests {
     fn sum_shader() -> Result<()> {
         let (_instance, _adapter, device, queue) = init().context("Init failed")?;
         let transformer = Transformer::new(&device);
-        
-        const WIDTH: usize = 1024;
-        const HEIGHT: usize = 1024;
+        const WIDTH: usize = 512;
+        const HEIGHT: usize = 512;
         const SIZE: [u32; 2] = [WIDTH as _, HEIGHT as _];
         let plane_fitter = PlaneFitter::new(&device, SIZE);
-        let init_data = |data: &mut [f32]| {
-            data.fill(f32::NAN);
-            data[0] = 1.;
-            data[1] = 2.;
-            data[2] = 3.;
-            data[3] = 4.;
-            data[4] = 5.;
-            data[5] = 6.;
-            data[6] = 7.;
-            data[7] = 8.;
-            data[8] = 9.;
-            data[9] = 10.;
-            data[WIDTH + 0] = 0.;
-            data[WIDTH + 1] = 1.;
-            data[WIDTH + 2] = 2.;
-            data[WIDTH + 3] = 3.;
-            data[WIDTH + 4] = 4.;
-            data[WIDTH + 5] = 5.;
-            data[WIDTH + 6] = 6.;
-            data[WIDTH + 7] = 7.;
-            data[WIDTH + 8] = 8.;
-            data[WIDTH + 9] = 9.;
+        let y_slope = 10000000.0;
+        let x_slope = 1.;
+        let init_data = |data: &mut [f64]| {
+            data.fill(f64::NAN);
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    let dat = &mut data[y * WIDTH + x];
+                    let (x, y) = (x as f64, y as f64);
+                    *dat = (y_slope / WIDTH as f64) * x + (x_slope / HEIGHT as f64) * y;
+                }
+            }
         };
         let original = Image::new(&device, Some("original_image"), SIZE, init_data);
         let z = Image::new(&device, Some("z_image"), SIZE, |_| {});
@@ -512,10 +511,7 @@ mod tests {
         let curve_x = Image::new(&device, Some("curve_x_image"), SIZE, |_| {});
         let slope_y = Image::new(&device, Some("slope_y_image"), SIZE, |_| {});
         let curve_y = Image::new(&device, Some("curve_y_image"), SIZE, |_| {});
-        let curve_xy = Image::new(&device, Some("curve_y_image"), SIZE, |_| {});
         let scratch = Image::new(&device, Some("scratch_image"), SIZE, |_| {});
-        let scratch2 = Image::new(&device, Some("scratch2_image"), SIZE, |_| {});
-        let scratch3 = Image::new(&device, Some("scratch3_image"), SIZE, |_| {});
         let query_set_buffer = StorageBuffer::<u64>::new(
             &device,
             Some("query_set_buffer"),
@@ -570,14 +566,19 @@ mod tests {
                 transformer.broadcast(&mut pass, &slope_y)?;
                 transformer.multiply(&mut pass, &slope_y, &ys, &scratch)?;
                 transformer.subtract(&mut pass, &z, &scratch, &z)?;
-                transformer.multiply(&mut pass, &curve_x, &x2s, &scratch)?;
-                transformer.subtract(&mut pass, &z, &scratch, &z)?;
-                transformer.multiply(&mut pass, &curve_y, &y2s, &scratch)?;
-                transformer.subtract(&mut pass, &z, &scratch, &z)?;
+                // transformer.multiply(&mut pass, &curve_x, &x2s, &scratch)?;
+                // transformer.subtract(&mut pass, &z, &scratch, &z)?;
+                // transformer.multiply(&mut pass, &curve_y, &y2s, &scratch)?;
+                // transformer.subtract(&mut pass, &z, &scratch, &z)?;
             } else {
                 original.set_arg_out(&mut pass);
                 z.set_arg_a(&mut pass);
                 plane_fitter.run(&mut pass);
+
+                // transformer.copy(&mut pass, &z, &original)?;
+                // original.set_arg_out(&mut pass);
+                // z.set_arg_a(&mut pass);
+                // plane_fitter.run(&mut pass);
             }
         }
         encoder.resolve_query_set(&query_set, 0..2, &query_set_buffer.inner, 0);
@@ -586,15 +587,46 @@ mod tests {
         ))?;
         unsafe { device.stop_graphics_debugger_capture() };
 
+        let debug_download = plane_fitter.buffers[6].queue_download(&device, &queue, ..);
+        let meta_download = plane_fitter.buffers[7].queue_download(&device, &queue, ..);
         let image_download = z.data_buffer.queue_download(&device, &queue, ..);
+        let x_download = slope_x.data_buffer.queue_download(&device, &queue, ..);
+        let y_download = slope_y.data_buffer.queue_download(&device, &queue, ..);
         let timestamps_download = query_set_buffer.queue_download(&device, &queue, ..);
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
 
-        println!("{:?}", &image_download.get().unwrap()[..10]);
-        println!("{:?}", &image_download.get().unwrap()[WIDTH..][..10]);
+        let image = image_download.get().unwrap();
+        for y in (0..HEIGHT).step_by(HEIGHT / 10) {
+            let row = &image[y * WIDTH..];
+            for x in (0..WIDTH).step_by(WIDTH / 10) {
+                print!("{:9.3e} ", row[x]);
+            }
+            println!("");
+        }
+        println!("Image ^   v Debug");
+        let image = debug_download.get().unwrap();
+        for y in (0..HEIGHT).step_by(HEIGHT / 10) {
+            let row = &image[y * WIDTH..];
+            for x in (0..WIDTH).step_by(WIDTH / 10) {
+                print!("{:9.3e} ", row[x]);
+            }
+            println!("");
+        }
         let times = timestamps_download.get().unwrap();
         println!("{:?} microseconds", (times[1] - times[0]) as f32 / 1000.);
-        dbg!(queue.get_timestamp_period());
+        println!(
+            "x: {}, y: {}",
+            meta_download.get().unwrap()[0],
+            meta_download.get().unwrap()[1]
+        );
+        println!(
+            "x: {}, y: {}",
+            x_download.get().unwrap()[0],
+            y_download.get().unwrap()[0]
+        );
+        println!("Actual:");
+        println!("x: {}, y: {}", x_slope, y_slope);
+
         Ok(())
     }
 
@@ -610,12 +642,12 @@ mod tests {
             .iter()
             .take(WIDTH * HEIGHT)
             .collect::<Vec<_>>();
-        let init_data = |data: &mut [f32]| {
+        let init_data = |data: &mut [f64]| {
             primes_int
                 .iter()
                 .zip(data.iter_mut())
                 .for_each(|(input, out)| {
-                    *out = *input as f32;
+                    *out = *input as f64;
                 })
         };
 
@@ -648,7 +680,7 @@ mod tests {
             .into_iter()
             .zip(&primes_int)
             .enumerate()
-            .filter(|(_, (a, b))| (a.sqrt() - **b as f32).abs() > f32::EPSILON)
+            .filter(|(_, (a, b))| (a.sqrt() - **b as f64).abs() > f64::EPSILON)
             .map(|(i, (a, _))| {
                 (
                     i,
@@ -676,7 +708,9 @@ mod tests {
             .context("Adapter request failed")?;
         let (dev, queue) = smol::block_on(adapter.request_device(&DeviceDescriptor {
             required_features: wgpu::Features {
-                features_wgpu: FeaturesWGPU::TIMESTAMP_QUERY_INSIDE_PASSES,
+                features_wgpu: FeaturesWGPU::TIMESTAMP_QUERY_INSIDE_PASSES
+                    | FeaturesWGPU::SHADER_F64
+                    | FeaturesWGPU::SHADER_INT64,
                 features_webgpu: FeaturesWebGPU::FLOAT32_FILTERABLE
                     | FeaturesWebGPU::TIMESTAMP_QUERY,
             },
@@ -752,7 +786,7 @@ mod tests {
                 ys[i].write((i / width) as f32);
             }
         }
-        let (mut xs, mut ys) = unsafe { (xs.assume_init(), ys.assume_init()) };
+        let (xs, ys) = unsafe { (xs.assume_init(), ys.assume_init()) };
         let xs_avg = sum_nan_aware(&xs) / count;
         let ys_avg = sum_nan_aware(&ys) / count;
         let zs_avg = zs_sum / count;

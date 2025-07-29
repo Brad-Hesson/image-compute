@@ -14,6 +14,6 @@ pub mod arity2 {
 }
 
 pub mod plane_fit {
-    #![allow(dead_code)]
+    #![allow(dead_code, non_snake_case)]
     include!(concat!(env!("OUT_DIR"), "/plane_fit.rs"));
 }
