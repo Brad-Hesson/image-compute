@@ -43,7 +43,7 @@ impl Image {
         let bind_group = plane_fit::bind_groups::BindGroup0::from_bindings(
             &device,
             plane_fit::bind_groups::BindGroupLayout0 {
-                image_in_size: size_buffer.inner.as_entire_buffer_binding(),
+                image_size: size_buffer.inner.as_entire_buffer_binding(),
                 image_in: data_buffer.inner.as_entire_buffer_binding(),
             },
         );
@@ -61,14 +61,14 @@ impl Image {
 
 #[allow(non_snake_case)]
 pub struct PlaneFitterBuffers {
-    xs: StorageBuffer<f64>,
-    ys: StorageBuffer<f64>,
-    zs: StorageBuffer<f64>,
-    image_sum__xzs: StorageBuffer<f64>,
-    ones_sum__x2s: StorageBuffer<f64>,
-    xs_sum__yzs: StorageBuffer<f64>,
-    ys_sum__y2s: StorageBuffer<f64>,
-    meta_out: StorageBuffer<f64>,
+    xz: StorageBuffer<f64>,
+    yz: StorageBuffer<f64>,
+    xx: StorageBuffer<f64>,
+    yy: StorageBuffer<f64>,
+    xxz: StorageBuffer<f64>,
+    yyz: StorageBuffer<f64>,
+    xyz: StorageBuffer<f64>,
+    xxyy: StorageBuffer<f64>,
     bg: plane_fit::bind_groups::BindGroup2,
     size: [u32; 2],
 }
@@ -83,62 +83,58 @@ impl PlaneFitterBuffers {
                 |_| {},
             )
         };
-        let xs = mk_buffer("xs");
-        let ys = mk_buffer("ys");
-        let zs = mk_buffer("zs");
-        #[allow(non_snake_case)]
-        let image_sum__xzs = mk_buffer("image_sum__xzs");
-        #[allow(non_snake_case)]
-        let ones_sum__x2s = mk_buffer("ones_sum__x2s");
-        #[allow(non_snake_case)]
-        let xs_sum__yzs = mk_buffer("xs_sum__yzs");
-        #[allow(non_snake_case)]
-        let ys_sum__y2s = mk_buffer("ys_sum__y2s");
-        let meta_out = mk_buffer("meta_out");
+        let xz = mk_buffer("xz");
+        let yz = mk_buffer("yz");
+        let xx = mk_buffer("xx");
+        let yy = mk_buffer("yy");
+        let xxz = mk_buffer("xxz");
+        let yyz = mk_buffer("yyz");
+        let xyz = mk_buffer("xyz");
+        let xxyy = mk_buffer("xxyy");
         Self {
+            size,
             bg: plane_fit::bind_groups::BindGroup2::from_bindings(
                 &device,
                 plane_fit::bind_groups::BindGroupLayout2 {
-                    xs: xs.inner.as_entire_buffer_binding(),
-                    ys: ys.inner.as_entire_buffer_binding(),
-                    zs: zs.inner.as_entire_buffer_binding(),
-                    image_sum__xzs: image_sum__xzs.inner.as_entire_buffer_binding(),
-                    ones_sum__x2s: ones_sum__x2s.inner.as_entire_buffer_binding(),
-                    xs_sum__yzs: xs_sum__yzs.inner.as_entire_buffer_binding(),
-                    ys_sum__y2s: ys_sum__y2s.inner.as_entire_buffer_binding(),
-                    meta_out: meta_out.inner.as_entire_buffer_binding(),
+                    xz: xz.inner.as_entire_buffer_binding(),
+                    yz: yz.inner.as_entire_buffer_binding(),
+                    xx: xx.inner.as_entire_buffer_binding(),
+                    yy: yy.inner.as_entire_buffer_binding(),
+                    xxz: xxz.inner.as_entire_buffer_binding(),
+                    yyz: yyz.inner.as_entire_buffer_binding(),
+                    xyz: xyz.inner.as_entire_buffer_binding(),
+                    xxyy: xxyy.inner.as_entire_buffer_binding(),
                 },
             ),
-            xs,
-            ys,
-            zs,
-            image_sum__xzs,
-            ones_sum__x2s,
-            xs_sum__yzs,
-            ys_sum__y2s,
-            meta_out,
-            size,
+            xz,
+            yz,
+            xx,
+            yy,
+            xxz,
+            yyz,
+            xyz,
+            xxyy,
         }
     }
 }
 
 pub struct PlaneFitter {
     first: ComputePipeline,
-    second_fourth: ComputePipeline,
+    second: ComputePipeline,
     third: ComputePipeline,
-    third_point_five: ComputePipeline,
+    fourth: ComputePipeline,
     fifth: ComputePipeline,
     qs: QuerySet,
     qs_buf: StorageBuffer<u64>,
 }
-const NUM_TIMESTAMPS: u32 = 12;
+const NUM_TIMESTAMPS: u32 = 10;
 impl PlaneFitter {
     pub fn new(device: &Device) -> Self {
         Self {
             first: plane_fit::compute::create_first_pipeline(device),
-            second_fourth: plane_fit::compute::create_second_fourth_pipeline(device),
+            second: plane_fit::compute::create_second_pipeline(device),
             third: plane_fit::compute::create_third_pipeline(device),
-            third_point_five: plane_fit::compute::create_third_point_five_pipeline(device),
+            fourth: plane_fit::compute::create_fourth_pipeline(device),
             fifth: plane_fit::compute::create_fifth_pipeline(device),
             qs: device.create_query_set(&QuerySetDescriptor {
                 label: Some("plane_fitter_qs"),
@@ -169,12 +165,12 @@ impl PlaneFitter {
             plane_fit::compute::FIRST_WORKGROUP_SIZE,
         );
         wts(pass);
-        pass.set_pipeline(&self.second_fourth);
+        pass.set_pipeline(&self.second);
         wts(pass);
         dispatch_reduction(
             pass,
             scratch_buffers.size,
-            plane_fit::compute::SECOND_FOURTH_WORKGROUP_SIZE,
+            plane_fit::compute::SECOND_WORKGROUP_SIZE,
         );
         wts(pass);
         pass.set_pipeline(&self.third);
@@ -185,20 +181,12 @@ impl PlaneFitter {
             plane_fit::compute::THIRD_WORKGROUP_SIZE,
         );
         wts(pass);
-        pass.set_pipeline(&self.third_point_five);
-        wts(pass);
-        dispatch_linear(
-            pass,
-            scratch_buffers.size,
-            plane_fit::compute::THIRD_POINT_FIVE_WORKGROUP_SIZE,
-        );
-        wts(pass);
-        pass.set_pipeline(&self.second_fourth);
+        pass.set_pipeline(&self.fourth);
         wts(pass);
         dispatch_reduction(
             pass,
             scratch_buffers.size,
-            plane_fit::compute::SECOND_FOURTH_WORKGROUP_SIZE,
+            plane_fit::compute::FOURTH_WORKGROUP_SIZE,
         );
         wts(pass);
         pass.set_pipeline(&self.fifth);
@@ -209,6 +197,7 @@ impl PlaneFitter {
             plane_fit::compute::FIFTH_WORKGROUP_SIZE,
         );
         wts(pass);
+        assert_eq!(NUM_TIMESTAMPS, qs_n);
     }
     pub fn queue_timings_download(
         &self,
@@ -222,7 +211,6 @@ impl PlaneFitter {
                 r[5] - r[4],
                 r[7] - r[6],
                 r[9] - r[8],
-                r[11] - r[10],
             ]
         })
     }
@@ -233,14 +221,6 @@ impl PlaneFitter {
 
 fn dispatch_linear(pass: &mut ComputePass, size: [u32; 2], wg_size: [u32; 3]) {
     pass.dispatch_workgroups(align_to(size[0] * size[1], wg_size[0]) / wg_size[0], 1, 1);
-}
-
-fn dispatch_tiles(pass: &mut ComputePass, size: [u32; 2], wg_size: [u32; 3]) {
-    pass.dispatch_workgroups(
-        align_to(size[0], wg_size[0]) / wg_size[0],
-        align_to(size[1], wg_size[1]) / wg_size[1],
-        1,
-    );
 }
 
 fn dispatch_reduction(pass: &mut ComputePass, size: [u32; 2], wg_size: [u32; 3]) {
@@ -283,20 +263,22 @@ mod tests {
     #[test]
     fn sum_shader() -> Result<()> {
         let (_instance, _adapter, device, queue) = init().context("Init failed")?;
-        const WIDTH: usize = 1000;
-        const HEIGHT: usize = 1000;
+        const WIDTH: usize = 512;
+        const HEIGHT: usize = 512;
         const SIZE: [u32; 2] = [WIDTH as _, HEIGHT as _];
         let plane_fitter = PlaneFitter::new(&device);
         let plane_fitter_buffers = PlaneFitterBuffers::new(&device, SIZE);
         let x_slope = 1.;
-        let y_slope = 100.0;
+        let y_slope = 10.0;
+        let xx_slope = 0.0001;
         let init_data = |data: &mut [f32]| {
             data.fill(f32::NAN);
             for y in 0..HEIGHT {
                 for x in 0..WIDTH {
                     let dat = &mut data[y * WIDTH + x];
                     let (x, y) = (x as f32, y as f32);
-                    *dat = (x_slope / WIDTH as f32) * x + (y_slope / HEIGHT as f32) * y;
+                    // *dat = (x_slope / WIDTH as f32) * x + (y_slope / HEIGHT as f32) * y;
+                    *dat = x_slope * x + y_slope * y + xx_slope * y * y;
                 }
             }
         };
@@ -308,10 +290,18 @@ mod tests {
             WIDTH * HEIGHT,
             |_| {},
         );
+        let meta_out = StorageBuffer::<f64>::new(
+            &device,
+            None,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            WIDTH * HEIGHT,
+            |_| {},
+        );
         let out_bg = shaders::plane_fit::bind_groups::BindGroup1::from_bindings(
             &device,
             plane_fit::bind_groups::BindGroupLayout1 {
                 image_out: image_out.inner.as_entire_buffer_binding(),
+                meta_out: meta_out.inner.as_entire_buffer_binding(),
             },
         );
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
@@ -329,14 +319,13 @@ mod tests {
             plane_fitter.run(&mut pass, &plane_fitter_buffers);
         }
         plane_fitter.resolve_timings(&mut encoder);
+        println!("Waiting for gpu...");
         device.poll(PollType::WaitForSubmissionIndex(
             queue.submit([encoder.finish()]),
         ))?;
         unsafe { device.stop_graphics_debugger_capture() };
 
-        let meta_download = plane_fitter_buffers
-            .meta_out
-            .queue_download(&device, &queue, ..);
+        let meta_download = meta_out.queue_download(&device, &queue, ..);
         let image_download = image_out.queue_download(&device, &queue, ..);
         let times_download = plane_fitter.queue_timings_download(&device, &queue);
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
@@ -357,9 +346,13 @@ mod tests {
             .collect::<Vec<_>>();
         println!("{times:?} -> {} micros", times.iter().sum::<f32>());
         println!(
-            "x: {}, y: {}",
-            meta_download.get().unwrap()[0],
-            meta_download.get().unwrap()[1]
+            "a: {}, x: {}, y: {}, xx: {}, yy: {}, xy: {}",
+            meta_download.get().unwrap()[0] / SIZE[0] as f64 / SIZE[1] as f64,
+            meta_download.get().unwrap()[1] / SIZE[0] as f64,
+            meta_download.get().unwrap()[2] / SIZE[1] as f64,
+            meta_download.get().unwrap()[3] / SIZE[0] as f64 / SIZE[0] as f64,
+            meta_download.get().unwrap()[4] / SIZE[1] as f64 / SIZE[1] as f64,
+            meta_download.get().unwrap()[5] / SIZE[0] as f64 / SIZE[1] as f64,
         );
         println!("Actual:");
         println!("x: {}, y: {}", x_slope, y_slope);
