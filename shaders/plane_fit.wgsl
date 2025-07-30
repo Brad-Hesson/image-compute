@@ -1,27 +1,25 @@
 @group(0) @binding(0)
 var<uniform> image_in_size: vec2<u32>;
 @group(0) @binding(1)
-var<storage, read_write> image_in: array<f64>;
+var<storage, read_write> image_in: array<f32>;
 
 @group(1) @binding(0)
-var<uniform> image_out_size: vec2<u32>;
-@group(1) @binding(1)
-var<storage, read_write> image_out: array<f64>;
+var<storage, read_write> image_out: array<f32>;
 
 @group(2) @binding(0)
 var<storage, read_write> xs: array<f64>;
 @group(2) @binding(1)
 var<storage, read_write> ys: array<f64>;
 @group(2) @binding(2)
-var<storage, read_write> image_sum__xzs: array<f64>;
+var<storage, read_write> zs: array<f64>;
 @group(2) @binding(3)
-var<storage, read_write> ones_sum__x2s: array<f64>;
+var<storage, read_write> image_sum__xzs: array<f64>;
 @group(2) @binding(4)
-var<storage, read_write> xs_sum__yzs: array<f64>;
+var<storage, read_write> ones_sum__x2s: array<f64>;
 @group(2) @binding(5)
-var<storage, read_write> ys_sum__y2s: array<f64>;
+var<storage, read_write> xs_sum__yzs: array<f64>;
 @group(2) @binding(6)
-var<storage, read_write> debug: array<f64>;
+var<storage, read_write> ys_sum__y2s: array<f64>;
 @group(2) @binding(7)
 var<storage, read_write> meta_out: array<f64>;
 
@@ -32,7 +30,7 @@ fn first(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let i = global_id.x;
     if i >= image_len() { return; }
     image_sum__xzs[i] = f64(image_in[i]);
-    if is_nan_f64(image_in[i]) {
+    if is_nan_f32(image_in[i]) {
         let nan = nan_f64();
         xs[i] = nan;
         ys[i] = nan;
@@ -105,8 +103,7 @@ fn third(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let count = ones_sum__x2s[0];
     xs[i] = (xs[i] * count - xs_sum__yzs[0]) / count;
     ys[i] = (ys[i] * count - ys_sum__y2s[0]) / count;
-    image_out[i] = (image_in[i] * count - image_sum__xzs[0]) / count;
-    debug[i] = xs[i];
+    zs[i] = (f64(image_in[i]) * count - image_sum__xzs[0]) / count;
 }
 
 @compute @workgroup_size(256)
@@ -115,7 +112,7 @@ fn third_point_five(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if i >= image_len() { return; }
     let x = xs[i];
     let y = ys[i];
-    let z = f64(image_out[i]);
+    let z = zs[i];
     image_sum__xzs[i] = x * z;
     ones_sum__x2s[i] = x * x;
     xs_sum__yzs[i] = y * z;
@@ -129,19 +126,18 @@ fn fifth(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x_slope = image_sum__xzs[0] / ones_sum__x2s[0];
     let y_slope = xs_sum__yzs[0] / ys_sum__y2s[0];
     let plane = x_slope * xs[i] + y_slope * ys[i];
-    image_out[i] = image_out[i] - plane;
+    image_out[i] = f32(zs[i] - plane);
     if i == 0u {
         meta_out[0] = x_slope;
         meta_out[1] = y_slope;
     }
 }
 
-
 fn image_width() -> u32 {
     return image_in_size.x;
 }
 fn image_len() -> u32 {
-    return image_out_size.x * image_out_size.y;
+    return image_in_size.x * image_in_size.y;
 }
 fn is_nan_f32(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);
@@ -156,7 +152,4 @@ fn is_nan_f64(x: f64) -> bool {
     return (exponent == u64(0x7FF0000000000000)) && (mantissa != u64(0));
 }
 fn nan_f32() -> f32 {return bitcast<f32>(0x7FC00000u);}
-fn nan_f64() -> f64 {
-    const nan_bits: u64 = u64(0x7ff8000000000000);
-    return bitcast<f64>(nan_bits);
-}
+fn nan_f64() -> f64 {return bitcast<f64>(u64(0x7ff8000000000000));}

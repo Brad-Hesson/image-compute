@@ -43,6 +43,28 @@ impl<T: Clone + NoUninit + AnyBitPattern> StorageBuffer<T> {
             bytemuck::cast_slice(data),
         );
     }
+    pub fn queue_download_with<W>(
+        &self,
+        device: &Device,
+        queue: &Queue,
+        range: impl RangeBounds<BufferAddress>,
+        f: impl FnOnce(&[T]) -> W + Send + 'static,
+    ) -> Arc<OnceLock<W>>
+    where
+        W: Sync + Send + Debug + 'static,
+    {
+        let buf = Arc::new(std::sync::OnceLock::new());
+        let buf_clone = buf.clone();
+        wgpu::util::DownloadBuffer::read_buffer(
+            device,
+            queue,
+            &self.inner.slice(range),
+            move |db| {
+                buf.set(f(bytemuck::cast_slice(&db.unwrap()))).unwrap();
+            },
+        );
+        buf_clone
+    }
     pub fn queue_download(
         &self,
         device: &Device,
@@ -52,21 +74,6 @@ impl<T: Clone + NoUninit + AnyBitPattern> StorageBuffer<T> {
     where
         T: Sync + Send + Debug,
     {
-        let buf = Arc::new(std::sync::OnceLock::new());
-        let buf_clone = buf.clone();
-        wgpu::util::DownloadBuffer::read_buffer(
-            device,
-            queue,
-            &self.inner.slice(range),
-            move |db| {
-                buf.set(
-                    bytemuck::cast_slice(&db.unwrap())
-                        .to_vec()
-                        .into_boxed_slice(),
-                )
-                .unwrap();
-            },
-        );
-        buf_clone
+        self.queue_download_with(device, queue, range, |r| r.to_vec().into_boxed_slice())
     }
 }
