@@ -6,7 +6,10 @@ use wgpu::{
     util::align_to, wgt::QuerySetDescriptor,
 };
 
-use crate::{buffers::StorageBuffer, shaders::plane_fit};
+use crate::{
+    buffers::StorageBuffer,
+    shaders::{plane_fit, plane_fit_32},
+};
 
 mod buffers;
 mod shaders;
@@ -65,10 +68,6 @@ pub struct PlaneFitterBuffers {
     yz: StorageBuffer<f64>,
     xx: StorageBuffer<f64>,
     yy: StorageBuffer<f64>,
-    xxz: StorageBuffer<f64>,
-    yyz: StorageBuffer<f64>,
-    xyz: StorageBuffer<f64>,
-    xxyy: StorageBuffer<f64>,
     bg: plane_fit::bind_groups::BindGroup2,
     size: [u32; 2],
 }
@@ -87,10 +86,6 @@ impl PlaneFitterBuffers {
         let yz = mk_buffer("yz");
         let xx = mk_buffer("xx");
         let yy = mk_buffer("yy");
-        let xxz = mk_buffer("xxz");
-        let yyz = mk_buffer("yyz");
-        let xyz = mk_buffer("xyz");
-        let xxyy = mk_buffer("xxyy");
         Self {
             size,
             bg: plane_fit::bind_groups::BindGroup2::from_bindings(
@@ -100,20 +95,12 @@ impl PlaneFitterBuffers {
                     yz: yz.inner.as_entire_buffer_binding(),
                     xx: xx.inner.as_entire_buffer_binding(),
                     yy: yy.inner.as_entire_buffer_binding(),
-                    xxz: xxz.inner.as_entire_buffer_binding(),
-                    yyz: yyz.inner.as_entire_buffer_binding(),
-                    xyz: xyz.inner.as_entire_buffer_binding(),
-                    xxyy: xxyy.inner.as_entire_buffer_binding(),
                 },
             ),
             xz,
             yz,
             xx,
             yy,
-            xxz,
-            yyz,
-            xyz,
-            xxyy,
         }
     }
 }
@@ -263,14 +250,14 @@ mod tests {
     #[test]
     fn sum_shader() -> Result<()> {
         let (_instance, _adapter, device, queue) = init().context("Init failed")?;
-        const WIDTH: usize = 512;
-        const HEIGHT: usize = 512;
+        const WIDTH: usize = 1024;
+        const HEIGHT: usize = 1024;
         const SIZE: [u32; 2] = [WIDTH as _, HEIGHT as _];
         let plane_fitter = PlaneFitter::new(&device);
         let plane_fitter_buffers = PlaneFitterBuffers::new(&device, SIZE);
         let x_slope = 1.;
-        let y_slope = 10.0;
-        let xx_slope = 0.0001;
+        let y_slope = 1000.0;
+        let xx_slope = 0.000;
         let init_data = |data: &mut [f32]| {
             data.fill(f32::NAN);
             for y in 0..HEIGHT {
@@ -305,59 +292,71 @@ mod tests {
             },
         );
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
-        unsafe { device.start_graphics_debugger_capture() };
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("test_name"),
-        });
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("Test Compute Pass"),
-                timestamp_writes: None,
+        let mut times = vec![0., 0., 0., 0., 0.];
+        for i in 0.. {
+            unsafe { device.start_graphics_debugger_capture() };
+            let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("test_name"),
             });
-            original.set(&mut pass);
-            out_bg.set(&mut pass);
-            plane_fitter.run(&mut pass, &plane_fitter_buffers);
-        }
-        plane_fitter.resolve_timings(&mut encoder);
-        println!("Waiting for gpu...");
-        device.poll(PollType::WaitForSubmissionIndex(
-            queue.submit([encoder.finish()]),
-        ))?;
-        unsafe { device.stop_graphics_debugger_capture() };
-
-        let meta_download = meta_out.queue_download(&device, &queue, ..);
-        let image_download = image_out.queue_download(&device, &queue, ..);
-        let times_download = plane_fitter.queue_timings_download(&device, &queue);
-        device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
-
-        let image = image_download.get().unwrap();
-        for y in (0..HEIGHT).step_by(HEIGHT / 10) {
-            let row = &image[y * WIDTH..];
-            for x in (0..WIDTH).step_by(WIDTH / 10) {
-                print!("{:9.3e} ", row[x]);
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Test Compute Pass"),
+                    timestamp_writes: None,
+                });
+                original.set(&mut pass);
+                out_bg.set(&mut pass);
+                plane_fitter.run(&mut pass, &plane_fitter_buffers);
             }
-            println!("");
+            plane_fitter.resolve_timings(&mut encoder);
+            device.poll(PollType::WaitForSubmissionIndex(
+                queue.submit([encoder.finish()]),
+            ))?;
+            unsafe { device.stop_graphics_debugger_capture() };
+            let meta_download = meta_out.queue_download(&device, &queue, ..);
+            let image_download = image_out.queue_download(&device, &queue, ..);
+            let times_download = plane_fitter.queue_timings_download(&device, &queue);
+            device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
+            let new_times = times_download
+                .get()
+                .unwrap()
+                .iter()
+                .map(|v| *v as f64 / 1000.);
+            let n = 10000;
+            let x = if i < n {
+                (10f64).powf(lerp(-1., -4., i as f64 / n as f64))
+            } else {
+                0.0001
+            };
+            for (mean, new) in times.iter_mut().zip(new_times) {
+                *mean = *mean * (1. - x) + new * x;
+            }
+            print!("{x:9.4} ");
+            println!("{times:9.4?} -> {:9.4} micros", times.iter().sum::<f64>());
         }
-        let times = times_download
-            .get()
-            .unwrap()
-            .iter()
-            .map(|v| *v as f32 / 1000.)
-            .collect::<Vec<_>>();
-        println!("{times:?} -> {} micros", times.iter().sum::<f32>());
-        println!(
-            "a: {}, x: {}, y: {}, xx: {}, yy: {}, xy: {}",
-            meta_download.get().unwrap()[0] / SIZE[0] as f64 / SIZE[1] as f64,
-            meta_download.get().unwrap()[1] / SIZE[0] as f64,
-            meta_download.get().unwrap()[2] / SIZE[1] as f64,
-            meta_download.get().unwrap()[3] / SIZE[0] as f64 / SIZE[0] as f64,
-            meta_download.get().unwrap()[4] / SIZE[1] as f64 / SIZE[1] as f64,
-            meta_download.get().unwrap()[5] / SIZE[0] as f64 / SIZE[1] as f64,
-        );
-        println!("Actual:");
-        println!("x: {}, y: {}", x_slope, y_slope);
+        // let image = image_download.get().unwrap();
+        // for y in (0..HEIGHT).step_by(HEIGHT / 10) {
+        //     let row = &image[y * WIDTH..];
+        //     for x in (0..WIDTH).step_by(WIDTH / 10) {
+        //         print!("{:9.3e} ", row[x]);
+        //     }
+        //     println!("");
+        // }
+        // println!(
+        //     "a: {}, x: {}, y: {}, xx: {}, yy: {}, xy: {}",
+        //     meta_download.get().unwrap()[0] / SIZE[0] as f32 / SIZE[1] as f32,
+        //     meta_download.get().unwrap()[1] / SIZE[0] as f32,
+        //     meta_download.get().unwrap()[2] / SIZE[1] as f32,
+        //     meta_download.get().unwrap()[3] / SIZE[0] as f32 / SIZE[0] as f32,
+        //     meta_download.get().unwrap()[4] / SIZE[1] as f32 / SIZE[1] as f32,
+        //     meta_download.get().unwrap()[5] / SIZE[0] as f32 / SIZE[1] as f32,
+        // );
+        // println!("Actual:");
+        // println!("x: {}, y: {}", x_slope, y_slope);
 
         Ok(())
+    }
+    fn lerp(s: f64, e: f64, t: f64) -> f64 {
+        t * e + (1. - t) * s
     }
     fn init() -> Result<(Instance, Adapter, Device, Queue)> {
         tracing_subscriber::fmt()
