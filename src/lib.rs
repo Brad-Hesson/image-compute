@@ -293,7 +293,7 @@ mod tests {
         );
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
         let mut times = vec![0., 0., 0., 0., 0.];
-        for i in 0.. {
+        for i in 1.. {
             unsafe { device.start_graphics_debugger_capture() };
             let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("test_name"),
@@ -312,8 +312,8 @@ mod tests {
                 queue.submit([encoder.finish()]),
             ))?;
             unsafe { device.stop_graphics_debugger_capture() };
-            let meta_download = meta_out.queue_download(&device, &queue, ..);
-            let image_download = image_out.queue_download(&device, &queue, ..);
+            // let meta_download = meta_out.queue_download(&device, &queue, ..);
+            // let image_download = image_out.queue_download(&device, &queue, ..);
             let times_download = plane_fitter.queue_timings_download(&device, &queue);
             device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
             let new_times = times_download
@@ -321,17 +321,16 @@ mod tests {
                 .unwrap()
                 .iter()
                 .map(|v| *v as f64 / 1000.);
-            let n = 10000;
-            let x = if i < n {
-                (10f64).powf(lerp(-1., -4., i as f64 / n as f64))
-            } else {
-                0.0001
-            };
+            let x = 1. / (i as f64);
             for (mean, new) in times.iter_mut().zip(new_times) {
                 *mean = *mean * (1. - x) + new * x;
             }
-            print!("{x:9.4} ");
-            println!("{times:9.4?} -> {:9.4} micros", times.iter().sum::<f64>());
+            if i % 100 == 0 {
+                println!(
+                    "{x:11.6} {times:9.4?} -> {:9.4} micros",
+                    times.iter().sum::<f64>()
+                );
+            }
         }
         // let image = image_download.get().unwrap();
         // for y in (0..HEIGHT).step_by(HEIGHT / 10) {
