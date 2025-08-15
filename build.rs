@@ -45,7 +45,7 @@ fn generate_wgsl_bindings(
         &format!("{}/{output}.wgsl", env::var("OUT_DIR")?),
         WriteOptions {
             derive_bytemuck_vertex: true,
-            derive_encase_host_shareable: true,
+            derive_encase_host_shareable: false,
             matrix_vector_types: MatrixVectorTypes::Glam,
             rustfmt: true,
             validate: Some(Default::default()),
