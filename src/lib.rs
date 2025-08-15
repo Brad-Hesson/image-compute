@@ -248,7 +248,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sum_shader() -> Result<()> {
+    fn output() -> Result<()> {
         let (_instance, _adapter, device, queue) = init().context("Init failed")?;
         const WIDTH: usize = 1024;
         const HEIGHT: usize = 1024;
@@ -292,6 +292,77 @@ mod tests {
             },
         );
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
+        unsafe { device.start_graphics_debugger_capture() };
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("test_name"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("Test Compute Pass"),
+                timestamp_writes: None,
+            });
+            original.set(&mut pass);
+            out_bg.set(&mut pass);
+            plane_fitter.run(&mut pass, &plane_fitter_buffers);
+        }
+        plane_fitter.resolve_timings(&mut encoder);
+        device.poll(PollType::WaitForSubmissionIndex(
+            queue.submit([encoder.finish()]),
+        ))?;
+        unsafe { device.stop_graphics_debugger_capture() };
+        let meta_download = meta_out.queue_download(&device, &queue, ..16);
+        let image_download = image_out.queue_download(&device, &queue, ..);
+        device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
+        let image = image_download.get().unwrap();
+        for y in (0..HEIGHT).step_by(HEIGHT / 10) {
+            let row = &image[y * WIDTH..];
+            for x in (0..WIDTH).step_by(WIDTH / 10) {
+                print!("{:9.3e} ", row[x]);
+            }
+            println!("");
+        }
+        println!(
+            "a: {}, x: {}, y: {}",
+            meta_download.get().unwrap()[0] / SIZE[0] as f64 / SIZE[1] as f64,
+            meta_download.get().unwrap()[1],
+            meta_download.get().unwrap()[2],
+        );
+        println!("Actual:");
+        println!("x: {}, y: {}", x_slope, y_slope);
+
+        Ok(())
+    }
+    #[test]
+    fn timing() -> Result<()> {
+        let (_instance, _adapter, device, queue) = init().context("Init failed")?;
+        const WIDTH: usize = 1024;
+        const HEIGHT: usize = 1024;
+        const SIZE: [u32; 2] = [WIDTH as _, HEIGHT as _];
+        let plane_fitter = PlaneFitter::new(&device);
+        let plane_fitter_buffers = PlaneFitterBuffers::new(&device, SIZE);
+        let original = Image::new(&device, Some("original_image"), SIZE, |_| {});
+        let image_out = StorageBuffer::<f32>::new(
+            &device,
+            None,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            WIDTH * HEIGHT,
+            |_| {},
+        );
+        let meta_out = StorageBuffer::<f64>::new(
+            &device,
+            None,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            WIDTH * HEIGHT,
+            |_| {},
+        );
+        let out_bg = shaders::plane_fit::bind_groups::BindGroup1::from_bindings(
+            &device,
+            plane_fit::bind_groups::BindGroupLayout1 {
+                image_out: image_out.inner.as_entire_buffer_binding(),
+                meta_out: meta_out.inner.as_entire_buffer_binding(),
+            },
+        );
+        device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
         let mut times = vec![0., 0., 0., 0., 0.];
         for i in 1.. {
             unsafe { device.start_graphics_debugger_capture() };
@@ -312,8 +383,6 @@ mod tests {
                 queue.submit([encoder.finish()]),
             ))?;
             unsafe { device.stop_graphics_debugger_capture() };
-            // let meta_download = meta_out.queue_download(&device, &queue, ..);
-            // let image_download = image_out.queue_download(&device, &queue, ..);
             let times_download = plane_fitter.queue_timings_download(&device, &queue);
             device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
             let new_times = times_download
@@ -332,26 +401,6 @@ mod tests {
                 );
             }
         }
-        // let image = image_download.get().unwrap();
-        // for y in (0..HEIGHT).step_by(HEIGHT / 10) {
-        //     let row = &image[y * WIDTH..];
-        //     for x in (0..WIDTH).step_by(WIDTH / 10) {
-        //         print!("{:9.3e} ", row[x]);
-        //     }
-        //     println!("");
-        // }
-        // println!(
-        //     "a: {}, x: {}, y: {}, xx: {}, yy: {}, xy: {}",
-        //     meta_download.get().unwrap()[0] / SIZE[0] as f32 / SIZE[1] as f32,
-        //     meta_download.get().unwrap()[1] / SIZE[0] as f32,
-        //     meta_download.get().unwrap()[2] / SIZE[1] as f32,
-        //     meta_download.get().unwrap()[3] / SIZE[0] as f32 / SIZE[0] as f32,
-        //     meta_download.get().unwrap()[4] / SIZE[1] as f32 / SIZE[1] as f32,
-        //     meta_download.get().unwrap()[5] / SIZE[0] as f32 / SIZE[1] as f32,
-        // );
-        // println!("Actual:");
-        // println!("x: {}, y: {}", x_slope, y_slope);
-
         Ok(())
     }
     fn lerp(s: f64, e: f64, t: f64) -> f64 {
