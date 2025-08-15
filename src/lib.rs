@@ -344,6 +344,7 @@ mod tests {
         );
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
         let mut times = vec![0., 0., 0., 0., 0.];
+        let mult = queue.get_timestamp_period();
         for i in 1.. {
             let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("test_name"),
@@ -367,7 +368,7 @@ mod tests {
                 .get()
                 .unwrap()
                 .iter()
-                .map(|v| *v as f64 / 1000.);
+                .map(|v| *v as f64 / 1000. * mult as f64);
             let x = 1. / (i as f64);
             for (mean, new) in times.iter_mut().zip(new_times) {
                 *mean = *mean * (1. - x) + new * x;
