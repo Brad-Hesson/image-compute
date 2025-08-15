@@ -32,23 +32,21 @@ fn second(
     let read_idx = num_workgroups.x * local_index + workgroup_id.x;
     if read_idx < image_len() {
         z_sum_wg[local_index] = meta_out[read_idx];
-        meta_out[read_idx] = 0.;
     } else {
         z_sum_wg[local_index] = 0.;
     }
-    workgroupBarrier();
-    var stride = WGS / 2u;
+    var stride = WGS >> 1u;
     while stride > 0u {
-        if local_index < stride {
-            z_sum_wg[local_index] += z_sum_wg[local_index + stride];
-        }
-        stride = stride / 2u;
+        if local_index >= stride {break;}
         workgroupBarrier();
+        z_sum_wg[local_index] += z_sum_wg[local_index + stride];
+        stride >>= 1u;
     }
     if local_index == 0u {
         meta_out[workgroup_id.x] = z_sum_wg[0];
+    } else {
+        meta_out[read_idx] = 0.;
     }
-    workgroupBarrier();
 }
 
 @compute @workgroup_size(256)
@@ -71,28 +69,26 @@ fn fourth(
     let read_idx = num_workgroups.x * local_index + workgroup_id.x;
     if read_idx < image_len() {
         xz_sum_wg[local_index] = xz[read_idx];
-        xz[read_idx] = 0.;
         yz_sum_wg[local_index] = yz[read_idx];
-        yz[read_idx] = 0.;
     } else {
         xz_sum_wg[local_index] = 0.;
         yz_sum_wg[local_index] = 0.;
     }
-    workgroupBarrier();
-    var stride = WGS / 2u;
+    var stride = WGS >> 1u;
     while stride > 0u {
-        if local_index < stride {
-            xz_sum_wg[local_index] += xz_sum_wg[local_index + stride];
-            yz_sum_wg[local_index] += yz_sum_wg[local_index + stride];
-        }
-        stride = stride / 2u;
+        if local_index >= stride { break; }
         workgroupBarrier();
+        xz_sum_wg[local_index] += xz_sum_wg[local_index + stride];
+        yz_sum_wg[local_index] += yz_sum_wg[local_index + stride];
+        stride >>= 1u;
     }
     if local_index == 0u {
         xz[workgroup_id.x] = xz_sum_wg[0];
         yz[workgroup_id.x] = yz_sum_wg[0];
+    } else {
+        xz[read_idx] = 0.;
+        yz[read_idx] = 0.;
     }
-    workgroupBarrier();
 }
 
 var<workgroup> x_slope: f64;
@@ -104,9 +100,8 @@ fn fifth(
 ) {
     let i = global_id.x;
     if i >= image_len() { return; }
-    let basis = calc_basis(i);
-    let sums = axis_sums();
     if local_index == 0u {
+        let sums = axis_sums();
         let s_xz = xz[0];
         let s_yz = yz[0];
         let s_xx = sums.x;
@@ -115,6 +110,7 @@ fn fifth(
         y_slope = s_yz / s_yy;
     }
     workgroupBarrier();
+    let basis = calc_basis(i);
     var plane = x_slope * basis.x + y_slope * basis.y;
     image_out[i] = f32(basis.z - plane);
     if i == 0u {

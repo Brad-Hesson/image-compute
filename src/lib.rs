@@ -6,10 +6,7 @@ use wgpu::{
     util::align_to, wgt::QuerySetDescriptor,
 };
 
-use crate::{
-    buffers::StorageBuffer,
-    shaders::{plane_fit, plane_fit_32},
-};
+use crate::{buffers::StorageBuffer, shaders::plane_fit};
 
 mod buffers;
 mod shaders;
@@ -138,43 +135,24 @@ impl PlaneFitter {
         scratch_buffers.bg.set(pass);
         pass.set_pipeline(&self.first);
         wts(pass);
-        dispatch_linear(
-            pass,
-            scratch_buffers.size,
-            plane_fit::compute::FIRST_WORKGROUP_SIZE,
-        );
+        dispatch_linear(pass, scratch_buffers.size);
         wts(pass);
         pass.set_pipeline(&self.second);
         wts(pass);
-        dispatch_reduction(
-            pass,
-            scratch_buffers.size,
-            plane_fit::compute::SECOND_WORKGROUP_SIZE,
-        );
+        dispatch_reduction(pass, scratch_buffers.size);
+        // dispatch_linear(pass, scratch_buffers.size);
         wts(pass);
         pass.set_pipeline(&self.third);
         wts(pass);
-        dispatch_linear(
-            pass,
-            scratch_buffers.size,
-            plane_fit::compute::THIRD_WORKGROUP_SIZE,
-        );
+        dispatch_linear(pass, scratch_buffers.size);
         wts(pass);
         pass.set_pipeline(&self.fourth);
         wts(pass);
-        dispatch_reduction(
-            pass,
-            scratch_buffers.size,
-            plane_fit::compute::FOURTH_WORKGROUP_SIZE,
-        );
+        dispatch_reduction(pass, scratch_buffers.size);
         wts(pass);
         pass.set_pipeline(&self.fifth);
         wts(pass);
-        dispatch_linear(
-            pass,
-            scratch_buffers.size,
-            plane_fit::compute::FIFTH_WORKGROUP_SIZE,
-        );
+        dispatch_linear(pass, scratch_buffers.size);
         wts(pass);
         assert_eq!(NUM_TIMESTAMPS, qs_n);
     }
@@ -198,14 +176,18 @@ impl PlaneFitter {
     }
 }
 
-fn dispatch_linear(pass: &mut ComputePass, size: [u32; 2], wg_size: [u32; 3]) {
-    pass.dispatch_workgroups(align_to(size[0] * size[1], wg_size[0]) / wg_size[0], 1, 1);
+fn dispatch_linear(pass: &mut ComputePass, size: [u32; 2]) {
+    pass.dispatch_workgroups(
+        align_to(size[0] * size[1], plane_fit::WGS) / plane_fit::WGS,
+        1,
+        1,
+    );
 }
 
-fn dispatch_reduction(pass: &mut ComputePass, size: [u32; 2], wg_size: [u32; 3]) {
+fn dispatch_reduction(pass: &mut ComputePass, size: [u32; 2]) {
     let mut remaining_data = size[0] * size[1];
     while remaining_data > 1 {
-        let num_workgroups = align_to(remaining_data, wg_size[0]) / wg_size[0];
+        let num_workgroups = align_to(remaining_data, plane_fit::WGS) / plane_fit::WGS;
         pass.dispatch_workgroups(num_workgroups, 1, 1);
         remaining_data = num_workgroups;
     }
@@ -247,21 +229,28 @@ mod tests {
         const SIZE: [u32; 2] = [WIDTH as _, HEIGHT as _];
         let plane_fitter = PlaneFitter::new(&device);
         let plane_fitter_buffers = PlaneFitterBuffers::new(&device, SIZE);
-        let x_slope = 1.;
-        let y_slope = 1000.0;
-        let xx_slope = 0.000;
+        let x_slope = 0.0;
+        let y_slope = 10.0;
+        let offset = 0.0;
+        let mut mean = 0.;
         let init_data = |data: &mut [f32]| {
-            data.fill(f32::NAN);
+            // data.fill(1.);
+            // for i in 0..data.len() {
+            //     data[i] = (i / 32) as f32;
+            // }
             for y in 0..HEIGHT {
                 for x in 0..WIDTH {
                     let dat = &mut data[y * WIDTH + x];
-                    let (x, y) = (x as f32, y as f32);
+                    let (x, y) = (x as f32 / WIDTH as f32, y as f32 / HEIGHT as f32);
                     // *dat = (x_slope / WIDTH as f32) * x + (y_slope / HEIGHT as f32) * y;
-                    *dat = x_slope * x + y_slope * y + xx_slope * y * y;
+                    let val = x_slope * x + y_slope * y + offset;
+                    *dat = val;
+                    mean += val as f64;
                 }
             }
         };
         let original = Image::new(&device, Some("original_image"), SIZE, init_data);
+        mean /= (WIDTH * HEIGHT) as f64;
         let image_out = StorageBuffer::<f32>::new(
             &device,
             None,
@@ -320,8 +309,7 @@ mod tests {
             meta_download.get().unwrap()[2],
         );
         println!("Actual:");
-        println!("x: {}, y: {}", x_slope, y_slope);
-
+        println!("a: {}, x: {}, y: {}", mean, x_slope, y_slope);
         Ok(())
     }
     #[test]
@@ -357,7 +345,6 @@ mod tests {
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
         let mut times = vec![0., 0., 0., 0., 0.];
         for i in 1.. {
-            unsafe { device.start_graphics_debugger_capture() };
             let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("test_name"),
             });
@@ -374,7 +361,6 @@ mod tests {
             device.poll(PollType::WaitForSubmissionIndex(
                 queue.submit([encoder.finish()]),
             ))?;
-            unsafe { device.stop_graphics_debugger_capture() };
             let times_download = plane_fitter.queue_timings_download(&device, &queue);
             device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
             let new_times = times_download
