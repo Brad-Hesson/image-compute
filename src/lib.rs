@@ -66,8 +66,6 @@ impl Image {
 pub struct PlaneFitterBuffers {
     xz: StorageBuffer<f64>,
     yz: StorageBuffer<f64>,
-    xx: StorageBuffer<f64>,
-    yy: StorageBuffer<f64>,
     bg: plane_fit::bind_groups::BindGroup2,
     size: [u32; 2],
 }
@@ -84,8 +82,6 @@ impl PlaneFitterBuffers {
         };
         let xz = mk_buffer("xz");
         let yz = mk_buffer("yz");
-        let xx = mk_buffer("xx");
-        let yy = mk_buffer("yy");
         Self {
             size,
             bg: plane_fit::bind_groups::BindGroup2::from_bindings(
@@ -93,14 +89,10 @@ impl PlaneFitterBuffers {
                 plane_fit::bind_groups::BindGroupLayout2 {
                     xz: xz.inner.as_entire_buffer_binding(),
                     yz: yz.inner.as_entire_buffer_binding(),
-                    xx: xx.inner.as_entire_buffer_binding(),
-                    yy: yy.inner.as_entire_buffer_binding(),
                 },
             ),
             xz,
             yz,
-            xx,
-            yy,
         }
     }
 }
