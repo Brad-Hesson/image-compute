@@ -47,7 +47,7 @@ impl<T: Clone + NoUninit + AnyBitPattern> StorageBuffer<T> {
         &self,
         device: &Device,
         queue: &Queue,
-        range: impl RangeBounds<BufferAddress>,
+        range: impl RangeBounds<usize>,
         f: impl FnOnce(&[T]) -> W + Send + 'static,
     ) -> Arc<OnceLock<W>>
     where
@@ -55,6 +55,7 @@ impl<T: Clone + NoUninit + AnyBitPattern> StorageBuffer<T> {
     {
         let buf = Arc::new(std::sync::OnceLock::new());
         let buf_clone = buf.clone();
+        let range = rangebounds_map(range, |v| (*v * size_of::<T>()) as BufferAddress);
         wgpu::util::DownloadBuffer::read_buffer(
             device,
             queue,
@@ -69,11 +70,21 @@ impl<T: Clone + NoUninit + AnyBitPattern> StorageBuffer<T> {
         &self,
         device: &Device,
         queue: &Queue,
-        range: impl RangeBounds<BufferAddress>,
+        range: impl RangeBounds<usize>,
     ) -> Arc<OnceLock<Box<[T]>>>
     where
         T: Sync + Send + Debug,
     {
         self.queue_download_with(device, queue, range, |r| r.to_vec().into_boxed_slice())
     }
+}
+
+fn rangebounds_map<I, O>(
+    range: impl RangeBounds<I>,
+    mut f: impl FnMut(&I) -> O,
+) -> impl RangeBounds<O> {
+    (
+        range.start_bound().map(&mut f),
+        range.end_bound().map(&mut f),
+    )
 }
