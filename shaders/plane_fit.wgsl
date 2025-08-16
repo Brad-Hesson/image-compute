@@ -23,6 +23,14 @@ fn copy_image(@builtin(global_invocation_id) global_id: vec3<u32>) {
     meta_out[i] = f64(image_in[i]);
 }
 
+@compute @workgroup_size(WGS)
+fn copy_image_transpose(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if global_id.x >= image_len() { return; }
+    let x = global_id.x % image_size.x;
+    let y = global_id.x / image_size.x;
+    meta_out[x * image_size.y + y] = f64(image_in[y * image_size.x + x]);
+}
+
 var<workgroup> z_sum_wg: array<f64, WGS>;
 @compute @workgroup_size(WGS)
 fn reduce_image(
@@ -58,25 +66,26 @@ fn reduce_image_lines(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+    let image_size = image_size.yx;
     let local_id = vec2(local_index % WGS_SQUARE, local_index / WGS_SQUARE);
-    let row_base = global_id.y * image_size.x;
-    let row_read_idx = num_workgroups.x * local_id.x + workgroup_id.x;
-    if row_read_idx < image_size.x && global_id.y < image_size.y {
-        z_sum_wg[local_index] = meta_out[row_base + row_read_idx];
+    let col_base = global_id.x;
+    let col_read_idx = num_workgroups.y * local_id.y + workgroup_id.y;
+    if col_read_idx < image_size.y && global_id.x < image_size.x {
+        z_sum_wg[local_index] = meta_out[col_base + col_read_idx * image_size.x];
     } else {
         z_sum_wg[local_index] = 0.;
     }
     var stride = WGS_SQUARE >> 1u;
     while stride > 0u {
-        if local_id.x >= stride {break;}
+        if local_id.y >= stride {break;}
         workgroupBarrier();
-        z_sum_wg[local_index] += z_sum_wg[local_index + stride];
+        z_sum_wg[local_index] += z_sum_wg[local_index + stride * WGS_SQUARE];
         stride >>= 1u;
     }
-    if local_id.x == 0u {
-        meta_out[row_base + workgroup_id.x] = z_sum_wg[local_id.y * WGS_SQUARE];
+    if local_id.y == 0u {
+        meta_out[col_base + workgroup_id.y * image_size.x] = z_sum_wg[local_id.x];
     } else {
-        meta_out[row_base + row_read_idx] = 0.;
+        meta_out[col_base + col_read_idx * image_size.x] = 0.;
     }
 }
 
@@ -155,8 +164,8 @@ fn subtract_lines(
     @builtin(local_invocation_index) local_index: u32,
     @builtin(global_invocation_id) global_id: vec3<u32>
 ) {
-    let row_sum = meta_out[(global_id.x / image_size.x) * image_size.x];
-    image_out[global_id.x] = image_in[global_id.x] - f32(row_sum / f64(image_size.x));
+    let row_mean = meta_out[global_id.x / image_size.x] / f64(image_size.x);
+    image_out[global_id.x] = f32(f64(image_in[global_id.x]) - row_mean);
 }
 
 fn image_len() -> u32 {

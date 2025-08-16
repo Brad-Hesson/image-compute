@@ -97,6 +97,7 @@ impl PlaneFitterBuffers {
 
 pub struct PlaneFitter {
     copy_image: ComputePipeline,
+    copy_image_transpose: ComputePipeline,
     generate_sums_plane: ComputePipeline,
     reduce_image: ComputePipeline,
     reduce_image_lines: ComputePipeline,
@@ -111,6 +112,7 @@ impl PlaneFitter {
         let n_timings = 5;
         Self {
             copy_image: plane_fit::compute::create_copy_image_pipeline(device),
+            copy_image_transpose: plane_fit::compute::create_copy_image_transpose_pipeline(device),
             generate_sums_plane: plane_fit::compute::create_generate_sums_plane_pipeline(device),
             reduce_image: plane_fit::compute::create_reduce_image_pipeline(device),
             reduce_image_lines: plane_fit::compute::create_reduce_image_lines_pipeline(device),
@@ -182,14 +184,14 @@ impl PlaneFitter {
         };
         scratch_buffers.bg.set(pass);
 
-        pass.set_pipeline(&self.copy_image);
+        pass.set_pipeline(&self.copy_image_transpose);
         wts(pass);
         dispatch_linear(pass, scratch_buffers.size);
         wts(pass);
 
         pass.set_pipeline(&self.reduce_image_lines);
         wts(pass);
-        dispatch_2d_reduction(pass, scratch_buffers.size);
+        dispatch_y_reduction(pass, scratch_buffers.size);
         wts(pass);
 
         pass.set_pipeline(&self.subtract_lines);
@@ -238,14 +240,14 @@ fn dispatch_reduction(pass: &mut ComputePass, size: [u32; 2]) {
     }
 }
 
-fn dispatch_2d_reduction(pass: &mut ComputePass, size: [u32; 2]) {
+fn dispatch_y_reduction(pass: &mut ComputePass, size: [u32; 2]) {
     let mut remaining_data = size[0];
     while remaining_data > 1 {
         let num_workgroups =
             align_to(remaining_data, plane_fit::WGS_SQUARE) / plane_fit::WGS_SQUARE;
         pass.dispatch_workgroups(
-            num_workgroups,
             align_to(size[1], plane_fit::WGS_SQUARE) / plane_fit::WGS_SQUARE,
+            num_workgroups,
             1,
         );
         remaining_data = num_workgroups;
@@ -284,7 +286,7 @@ mod tests {
     #[test]
     fn output() -> Result<()> {
         let (_instance, _adapter, device, queue) = init().context("Init failed")?;
-        const WIDTH: usize = 1024;
+        const WIDTH: usize = 512;
         const HEIGHT: usize = 1024;
         const SIZE: [u32; 2] = [WIDTH as _, HEIGHT as _];
         let plane_fitter = PlaneFitter::new(&device);
@@ -301,11 +303,11 @@ mod tests {
             for y in 0..HEIGHT {
                 for x in 0..WIDTH {
                     let dat = &mut data[y * WIDTH + x];
-                    let (x, y) = (x as f32 / WIDTH as f32, y as f32 / HEIGHT as f32);
+                    // let (x, y) = (x as f32 / WIDTH as f32, y as f32 / HEIGHT as f32);
                     // *dat = (x_slope / WIDTH as f32) * x + (y_slope / HEIGHT as f32) * y;
-                    let val = x_slope * x + y_slope * y + offset;
-                    *dat = val;
-                    mean += val as f64;
+                    // let val = x_slope * x + y_slope * y + offset;
+                    *dat = y as f32;
+                    // mean += val as f64;
                 }
             }
         };
@@ -363,11 +365,17 @@ mod tests {
             }
             println!("");
         }
+        // println!(
+        //     "a: {}, x: {}, y: {}",
+        //     meta_download.get().unwrap()[0] / SIZE[0] as f64 / SIZE[1] as f64,
+        //     meta_download.get().unwrap()[1] * SIZE[0] as f64,
+        //     meta_download.get().unwrap()[2] * SIZE[1] as f64,
+        // );
         println!(
-            "a: {}, x: {}, y: {}",
-            meta_download.get().unwrap()[0] / SIZE[0] as f64 / SIZE[1] as f64,
-            meta_download.get().unwrap()[1] * SIZE[0] as f64,
-            meta_download.get().unwrap()[2] * SIZE[1] as f64,
+            "0: {}, 1: {}, 2: {}",
+            meta_download.get().unwrap()[0],
+            meta_download.get().unwrap()[1],
+            meta_download.get().unwrap()[2],
         );
         println!("Actual:");
         println!("a: {}, x: {}, y: {}", mean, x_slope, y_slope);
