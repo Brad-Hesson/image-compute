@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use std::sync::{Arc, OnceLock};
 
+use itertools::Itertools;
 use wgpu::{
     BufferUsages, CommandEncoder, ComputePass, ComputePipeline, Device, QuerySet, QueryType, Queue,
     util::align_to, wgt::QuerySetDescriptor,
@@ -95,84 +96,128 @@ impl PlaneFitterBuffers {
 }
 
 pub struct PlaneFitter {
-    first: ComputePipeline,
-    second: ComputePipeline,
-    third: ComputePipeline,
-    fourth: ComputePipeline,
-    fifth: ComputePipeline,
+    copy_image: ComputePipeline,
+    generate_sums_plane: ComputePipeline,
+    reduce_image: ComputePipeline,
+    reduce_image_lines: ComputePipeline,
+    reduce_sums_plane: ComputePipeline,
+    subtract_plane: ComputePipeline,
+    subtract_lines: ComputePipeline,
     qs: QuerySet,
     qs_buf: StorageBuffer<u64>,
 }
-const NUM_TIMESTAMPS: u32 = 10;
 impl PlaneFitter {
     pub fn new(device: &Device) -> Self {
+        let n_timings = 5;
         Self {
-            first: plane_fit::compute::create_first_pipeline(device),
-            second: plane_fit::compute::create_second_pipeline(device),
-            third: plane_fit::compute::create_third_pipeline(device),
-            fourth: plane_fit::compute::create_fourth_pipeline(device),
-            fifth: plane_fit::compute::create_fifth_pipeline(device),
+            copy_image: plane_fit::compute::create_copy_image_pipeline(device),
+            generate_sums_plane: plane_fit::compute::create_generate_sums_plane_pipeline(device),
+            reduce_image: plane_fit::compute::create_reduce_image_pipeline(device),
+            reduce_image_lines: plane_fit::compute::create_reduce_image_lines_pipeline(device),
+            reduce_sums_plane: plane_fit::compute::create_reduce_sums_plane_pipeline(device),
+            subtract_plane: plane_fit::compute::create_subtract_plane_pipeline(device),
+            subtract_lines: plane_fit::compute::create_subtract_lines_pipeline(device),
             qs: device.create_query_set(&QuerySetDescriptor {
                 label: Some("plane_fitter_qs"),
                 ty: QueryType::Timestamp,
-                count: NUM_TIMESTAMPS,
+                count: n_timings * 2,
             }),
             qs_buf: StorageBuffer::new(
                 device,
                 Some("plane_fitter_qs_buf"),
                 BufferUsages::QUERY_RESOLVE | BufferUsages::COPY_SRC,
-                NUM_TIMESTAMPS as usize,
+                n_timings as usize * 2,
                 |_| {},
             ),
         }
     }
-    pub fn run(&self, pass: &mut ComputePass, scratch_buffers: &PlaneFitterBuffers) {
+    pub fn run_subtract_plane(
+        &self,
+        pass: &mut ComputePass,
+        scratch_buffers: &PlaneFitterBuffers,
+    ) -> usize {
         let mut qs_n = 0;
         let mut wts = |pass: &mut ComputePass| {
-            pass.write_timestamp(&self.qs, qs_n);
+            pass.write_timestamp(&self.qs, qs_n as u32);
             qs_n += 1;
         };
         scratch_buffers.bg.set(pass);
-        pass.set_pipeline(&self.first);
+
+        pass.set_pipeline(&self.copy_image);
         wts(pass);
         dispatch_linear(pass, scratch_buffers.size);
         wts(pass);
-        pass.set_pipeline(&self.second);
-        wts(pass);
-        dispatch_reduction(pass, scratch_buffers.size);
-        // dispatch_linear(pass, scratch_buffers.size);
-        wts(pass);
-        pass.set_pipeline(&self.third);
-        wts(pass);
-        dispatch_linear(pass, scratch_buffers.size);
-        wts(pass);
-        pass.set_pipeline(&self.fourth);
+
+        pass.set_pipeline(&self.reduce_image);
         wts(pass);
         dispatch_reduction(pass, scratch_buffers.size);
         wts(pass);
-        pass.set_pipeline(&self.fifth);
+
+        pass.set_pipeline(&self.generate_sums_plane);
         wts(pass);
         dispatch_linear(pass, scratch_buffers.size);
         wts(pass);
-        assert_eq!(NUM_TIMESTAMPS, qs_n);
+
+        pass.set_pipeline(&self.reduce_sums_plane);
+        wts(pass);
+        dispatch_reduction(pass, scratch_buffers.size);
+        wts(pass);
+
+        pass.set_pipeline(&self.subtract_plane);
+        wts(pass);
+        dispatch_linear(pass, scratch_buffers.size);
+        wts(pass);
+
+        qs_n / 2
+    }
+    pub fn run_subtract_lines(
+        &self,
+        pass: &mut ComputePass,
+        scratch_buffers: &PlaneFitterBuffers,
+    ) -> usize {
+        let mut qs_n = 0;
+        let mut wts = |pass: &mut ComputePass| {
+            pass.write_timestamp(&self.qs, qs_n as u32);
+            qs_n += 1;
+        };
+        scratch_buffers.bg.set(pass);
+
+        pass.set_pipeline(&self.copy_image);
+        wts(pass);
+        dispatch_linear(pass, scratch_buffers.size);
+        wts(pass);
+
+        pass.set_pipeline(&self.reduce_image_lines);
+        wts(pass);
+        dispatch_2d_reduction(pass, scratch_buffers.size);
+        wts(pass);
+
+        pass.set_pipeline(&self.subtract_lines);
+        wts(pass);
+        dispatch_linear(pass, scratch_buffers.size);
+        wts(pass);
+
+        qs_n / 2
     }
     pub fn queue_timings_download(
         &self,
         device: &Device,
         queue: &Queue,
-    ) -> Arc<OnceLock<[u64; NUM_TIMESTAMPS as usize / 2]>> {
-        self.qs_buf.queue_download_with(device, queue, .., |r| {
-            [
-                r[1] - r[0],
-                r[3] - r[2],
-                r[5] - r[4],
-                r[7] - r[6],
-                r[9] - r[8],
-            ]
-        })
+        num: usize,
+    ) -> Arc<OnceLock<Box<[u64]>>> {
+        self.qs_buf
+            .queue_download_with(device, queue, ..num * 2, |r| {
+                r.iter()
+                    .chunks(2)
+                    .into_iter()
+                    .map(|c| c.collect_tuple().unwrap())
+                    .map(|(a, b)| b.saturating_sub(*a))
+                    .collect_vec()
+                    .into_boxed_slice()
+            })
     }
-    pub fn resolve_timings(&self, encoder: &mut CommandEncoder) {
-        encoder.resolve_query_set(&self.qs, 0..NUM_TIMESTAMPS, &self.qs_buf.inner, 0);
+    pub fn resolve_timings(&self, encoder: &mut CommandEncoder, num: usize) {
+        encoder.resolve_query_set(&self.qs, 0..num as u32 * 2, &self.qs_buf.inner, 0);
     }
 }
 
@@ -189,6 +234,20 @@ fn dispatch_reduction(pass: &mut ComputePass, size: [u32; 2]) {
     while remaining_data > 1 {
         let num_workgroups = align_to(remaining_data, plane_fit::WGS) / plane_fit::WGS;
         pass.dispatch_workgroups(num_workgroups, 1, 1);
+        remaining_data = num_workgroups;
+    }
+}
+
+fn dispatch_2d_reduction(pass: &mut ComputePass, size: [u32; 2]) {
+    let mut remaining_data = size[0];
+    while remaining_data > 1 {
+        let num_workgroups =
+            align_to(remaining_data, plane_fit::WGS_SQUARE) / plane_fit::WGS_SQUARE;
+        pass.dispatch_workgroups(
+            num_workgroups,
+            align_to(size[1], plane_fit::WGS_SQUARE) / plane_fit::WGS_SQUARE,
+            1,
+        );
         remaining_data = num_workgroups;
     }
 }
@@ -212,6 +271,7 @@ pub enum TransformError {
 #[cfg(test)]
 mod tests {
     use eyre::{Context, Result};
+    use itertools::izip;
     use tracing::info;
     use tracing_subscriber::EnvFilter;
     use wgpu::{
@@ -229,7 +289,7 @@ mod tests {
         const SIZE: [u32; 2] = [WIDTH as _, HEIGHT as _];
         let plane_fitter = PlaneFitter::new(&device);
         let plane_fitter_buffers = PlaneFitterBuffers::new(&device, SIZE);
-        let x_slope = 0.0;
+        let x_slope = 1.0;
         let y_slope = 10.0;
         let offset = 0.0;
         let mut mean = 0.;
@@ -277,6 +337,7 @@ mod tests {
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("test_name"),
         });
+        let n_times;
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("Test Compute Pass"),
@@ -284,9 +345,9 @@ mod tests {
             });
             original.set(&mut pass);
             out_bg.set(&mut pass);
-            plane_fitter.run(&mut pass, &plane_fitter_buffers);
+            n_times = plane_fitter.run_subtract_lines(&mut pass, &plane_fitter_buffers);
         }
-        plane_fitter.resolve_timings(&mut encoder);
+        plane_fitter.resolve_timings(&mut encoder, n_times);
         device.poll(PollType::WaitForSubmissionIndex(
             queue.submit([encoder.finish()]),
         ))?;
@@ -305,8 +366,8 @@ mod tests {
         println!(
             "a: {}, x: {}, y: {}",
             meta_download.get().unwrap()[0] / SIZE[0] as f64 / SIZE[1] as f64,
-            meta_download.get().unwrap()[1],
-            meta_download.get().unwrap()[2],
+            meta_download.get().unwrap()[1] * SIZE[0] as f64,
+            meta_download.get().unwrap()[2] * SIZE[1] as f64,
         );
         println!("Actual:");
         println!("a: {}, x: {}, y: {}", mean, x_slope, y_slope);
@@ -344,11 +405,13 @@ mod tests {
         );
         device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
         let mut times = vec![0., 0., 0., 0., 0.];
+        let mut latest = vec![0., 0., 0., 0., 0.];
         let mult = queue.get_timestamp_period();
         for i in 1.. {
             let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("test_name"),
             });
+            let n_times;
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("Test Compute Pass"),
@@ -356,13 +419,13 @@ mod tests {
                 });
                 original.set(&mut pass);
                 out_bg.set(&mut pass);
-                plane_fitter.run(&mut pass, &plane_fitter_buffers);
+                n_times = plane_fitter.run_subtract_lines(&mut pass, &plane_fitter_buffers);
             }
-            plane_fitter.resolve_timings(&mut encoder);
+            plane_fitter.resolve_timings(&mut encoder, n_times);
             device.poll(PollType::WaitForSubmissionIndex(
                 queue.submit([encoder.finish()]),
             ))?;
-            let times_download = plane_fitter.queue_timings_download(&device, &queue);
+            let times_download = plane_fitter.queue_timings_download(&device, &queue, n_times);
             device.poll(PollType::WaitForSubmissionIndex(queue.submit([])))?;
             let new_times = times_download
                 .get()
@@ -370,14 +433,20 @@ mod tests {
                 .iter()
                 .map(|v| *v as f64 / 1000. * mult as f64);
             let x = 1. / (i as f64);
-            for (mean, new) in times.iter_mut().zip(new_times) {
+            for (mean, late, new) in izip!(times.iter_mut(), latest.iter_mut(), new_times) {
+                *late = new;
                 *mean = *mean * (1. - x) + new * x;
             }
             if i % 100 == 0 {
                 println!(
+                    "            {latest:9.4?} -> {:9.4} micros",
+                    latest.iter().sum::<f64>()
+                );
+                println!(
                     "{x:11.6} {times:9.4?} -> {:9.4} micros",
                     times.iter().sum::<f64>()
                 );
+                println!();
             }
         }
         Ok(())

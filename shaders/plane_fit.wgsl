@@ -1,7 +1,7 @@
 @group(0) @binding(0)
 var<uniform> image_size: vec2<u32>;
 @group(0) @binding(1)
-var<storage, read_write> image_in: array<f32>;
+var<storage, read> image_in: array<f32>;
 
 @group(1) @binding(0)
 var<storage, read_write> image_out: array<f32>;
@@ -14,9 +14,10 @@ var<storage, read_write> xz: array<f64>;
 var<storage, read_write> yz: array<f64>;
 
 const WGS: u32 = 256u;
+const WGS_SQUARE: u32 = 16u;
 
 @compute @workgroup_size(WGS)
-fn first(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn copy_image(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let i = global_id.x;
     if i >= image_len() { return; }
     meta_out[i] = f64(image_in[i]);
@@ -24,7 +25,7 @@ fn first(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 var<workgroup> z_sum_wg: array<f64, WGS>;
 @compute @workgroup_size(WGS)
-fn second(
+fn reduce_image(
     @builtin(local_invocation_index) local_index: u32,
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(num_workgroups) num_workgroups: vec3<u32>
@@ -49,8 +50,38 @@ fn second(
     }
 }
 
+var<workgroup> z_sum_lines_wg: array<f64, WGS>;
+@compute @workgroup_size(WGS_SQUARE, WGS_SQUARE)
+fn reduce_image_lines(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_index) local_index: u32,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {
+    let local_id = vec2(local_index % WGS_SQUARE, local_index / WGS_SQUARE);
+    let row_base = global_id.y * image_size.x;
+    let row_read_idx = num_workgroups.x * local_id.x + workgroup_id.x;
+    if row_read_idx < image_size.x && global_id.y < image_size.y {
+        z_sum_wg[local_index] = meta_out[row_base + row_read_idx];
+    } else {
+        z_sum_wg[local_index] = 0.;
+    }
+    var stride = WGS_SQUARE >> 1u;
+    while stride > 0u {
+        if local_id.x >= stride {break;}
+        workgroupBarrier();
+        z_sum_wg[local_index] += z_sum_wg[local_index + stride];
+        stride >>= 1u;
+    }
+    if local_id.x == 0u {
+        meta_out[row_base + workgroup_id.x] = z_sum_wg[local_id.y * WGS_SQUARE];
+    } else {
+        meta_out[row_base + row_read_idx] = 0.;
+    }
+}
+
 @compute @workgroup_size(256)
-fn third(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn generate_sums_plane(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let i = global_id.x;
     if i >= image_len() { return; }
     let basis = calc_basis(i);
@@ -61,7 +92,7 @@ fn third(@builtin(global_invocation_id) global_id: vec3<u32>) {
 var<workgroup> xz_sum_wg: array<f64, WGS>;
 var<workgroup> yz_sum_wg: array<f64, WGS>;
 @compute @workgroup_size(WGS)
-fn fourth(
+fn reduce_sums_plane(
     @builtin(local_invocation_index) local_index: u32,
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(num_workgroups) num_workgroups: vec3<u32>
@@ -94,7 +125,7 @@ fn fourth(
 var<workgroup> x_slope: f64;
 var<workgroup> y_slope: f64;
 @compute @workgroup_size(256)
-fn fifth(
+fn subtract_plane(
     @builtin(local_invocation_index) local_index: u32,
     @builtin(global_invocation_id) global_id: vec3<u32>
 ) {
@@ -117,6 +148,15 @@ fn fifth(
         meta_out[1] = x_slope;
         meta_out[2] = y_slope;
     }
+}
+
+@compute @workgroup_size(256)
+fn subtract_lines(
+    @builtin(local_invocation_index) local_index: u32,
+    @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+    let row_sum = meta_out[(global_id.x / image_size.x) * image_size.x];
+    image_out[global_id.x] = image_in[global_id.x] - f32(row_sum / f64(image_size.x));
 }
 
 fn image_len() -> u32 {
