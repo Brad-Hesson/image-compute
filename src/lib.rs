@@ -278,7 +278,8 @@ mod tests {
     use tracing_subscriber::EnvFilter;
     use wgpu::{
         Adapter, CommandEncoderDescriptor, ComputePassDescriptor, Device, DeviceDescriptor,
-        FeaturesWGPU, FeaturesWebGPU, Instance, PollType, Queue, RequestAdapterOptions,
+        FeaturesWGPU, FeaturesWebGPU, Instance, PollType, PowerPreference, Queue,
+        RequestAdapterOptions,
     };
 
     use super::*;
@@ -468,8 +469,12 @@ mod tests {
             .init();
         info!("{:?}", wgpu::Instance::enabled_backend_features());
         let instance = wgpu::Instance::default();
-        let adapter = smol::block_on(instance.request_adapter(&RequestAdapterOptions::default()))
-            .context("Adapter request failed")?;
+        let adapter = smol::block_on(instance.request_adapter(&RequestAdapterOptions {
+            power_preference: PowerPreference::HighPerformance,
+            force_fallback_adapter: true,
+            compatible_surface: None,
+        }))
+        .context("Adapter request failed")?;
         let (dev, queue) = smol::block_on(adapter.request_device(&DeviceDescriptor {
             required_features: wgpu::Features {
                 features_wgpu: FeaturesWGPU::TIMESTAMP_QUERY_INSIDE_PASSES
