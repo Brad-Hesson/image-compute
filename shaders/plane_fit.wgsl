@@ -58,7 +58,6 @@ fn reduce_image(
     }
 }
 
-var<workgroup> z_sum_lines_wg: array<f64, WGS>;
 @compute @workgroup_size(WGS_SQUARE, WGS_SQUARE)
 fn reduce_image_lines(
     @builtin(global_invocation_id) global_id: vec3<u32>,
@@ -66,12 +65,11 @@ fn reduce_image_lines(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
-    let image_size = image_size.yx;
+    let sz = image_size.yx;
     let local_id = vec2(local_index % WGS_SQUARE, local_index / WGS_SQUARE);
-    let col_base = global_id.x;
     let col_read_idx = num_workgroups.y * local_id.y + workgroup_id.y;
     if col_read_idx < image_size.y && global_id.x < image_size.x {
-        z_sum_wg[local_index] = meta_out[col_base + col_read_idx * image_size.x];
+        z_sum_wg[local_index] = meta_out[idx(sz, global_id.x, col_read_idx)];
     } else {
         z_sum_wg[local_index] = 0.;
     }
@@ -83,9 +81,9 @@ fn reduce_image_lines(
         stride >>= 1u;
     }
     if local_id.y == 0u {
-        meta_out[col_base + workgroup_id.y * image_size.x] = z_sum_wg[local_id.x];
+        meta_out[idx(sz, global_id.x, workgroup_id.y)] = z_sum_wg[local_id.x];
     } else {
-        meta_out[col_base + col_read_idx * image_size.x] = 0.;
+        meta_out[idx(sz, global_id.x, col_read_idx)] = 0.;
     }
 }
 
@@ -96,6 +94,16 @@ fn generate_sums_plane(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let basis = calc_basis(i);
     xz[i] = basis.x * basis.z;
     yz[i] = basis.y * basis.z;
+}
+
+@compute @workgroup_size(256)
+fn generate_sums_lines(@builtin(global_invocation_id) global_index: vec3<u32>) {
+    let i = global_index.x;
+    if i >= image_len() { return; }
+    let global_id = vec2(global_index.x % image_size.x, global_index.x / image_size.x);
+    let mean = meta_out[global_id.y];
+    let val = (f64(image_in[i]) - mean) * mean_center(image_size.x, global_id.x);
+    xz[idx(image_size.yx, global_id.y, global_id.x)] = val;
 }
 
 var<workgroup> xz_sum_wg: array<f64, WGS>;
@@ -131,6 +139,35 @@ fn reduce_sums_plane(
     }
 }
 
+@compute @workgroup_size(WGS_SQUARE, WGS_SQUARE)
+fn reduce_sums_lines(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_index) local_index: u32,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {
+    let sz = image_size.yx;
+    let local_id = vec2(local_index % WGS_SQUARE, local_index / WGS_SQUARE);
+    let col_read_idx = num_workgroups.y * local_id.y + workgroup_id.y;
+    if col_read_idx < image_size.y && global_id.x < image_size.x {
+        xz_sum_wg[local_index] = xz[idx(sz, global_id.x, col_read_idx)];
+    } else {
+        xz_sum_wg[local_index] = 0.;
+    }
+    var stride = WGS_SQUARE >> 1u;
+    while stride > 0u {
+        if local_id.y >= stride {break;}
+        workgroupBarrier();
+        xz_sum_wg[local_index] += xz_sum_wg[local_index + stride * WGS_SQUARE];
+        stride >>= 1u;
+    }
+    if local_id.y == 0u {
+        xz[idx(sz, global_id.x, workgroup_id.y)] = xz_sum_wg[local_id.x];
+    } else {
+        xz[idx(sz, global_id.x, col_read_idx)] = 0.;
+    }
+}
+
 var<workgroup> x_slope: f64;
 var<workgroup> y_slope: f64;
 @compute @workgroup_size(256)
@@ -162,10 +199,17 @@ fn subtract_plane(
 @compute @workgroup_size(256)
 fn subtract_lines(
     @builtin(local_invocation_index) local_index: u32,
-    @builtin(global_invocation_id) global_id: vec3<u32>
+    @builtin(global_invocation_id) global_index: vec3<u32>
 ) {
-    let row_mean = meta_out[global_id.x / image_size.x] / f64(image_size.x);
-    image_out[global_id.x] = f32(f64(image_in[global_id.x]) - row_mean);
+    let i = global_index.x;
+    if i >= image_len() { return; }
+    let global_id = vec2(global_index.x % image_size.x, global_index.x / image_size.x);
+    let mean = meta_out[global_id.y] / f64(image_size.x);
+    let slope = xz[global_id.y] / axis_sum();
+    image_out[i] = f32(f64(image_in[i]) - mean - slope * mean_center(image_size.x, global_id.x));
+    if global_id.x == 0u {
+        meta_out[image_size.y + global_id.y] = slope;
+    }
 }
 
 fn image_len() -> u32 {
@@ -178,10 +222,13 @@ fn calc_basis(i: u32) -> vec3<f64> {
     let y = i / w;
     let count = f64(image_size.x * image_size.y);
     return vec3(
-        f64(i32(x << 1u) - i32(w) + i32(1u)) / 2,
-        f64(i32(y << 1u) - i32(h) + i32(1u)) / 2,
+        mean_center(w, x),
+        mean_center(h, y),
         f64(image_in[i]) - meta_out[0] / count
     );
+}
+fn mean_center(w: u32, x: u32) -> f64 {
+    return f64(i32(x << 1u) - i32(w) + i32(1u)) / 2;
 }
 fn axis_sums() -> vec2<f64> {
     let w = f64(image_size.x);
@@ -191,4 +238,12 @@ fn axis_sums() -> vec2<f64> {
         tmp * (w * w - 1),
         tmp * (h * h - 1)
     );
+}
+fn axis_sum() -> f64 {
+    let w = f64(image_size.x);
+    let tmp = w / f64(12);
+    return tmp * (w * w - 1);
+}
+fn idx(sz: vec2<u32>, x: u32, y: u32) -> u32 {
+    return x + y * sz.x;
 }

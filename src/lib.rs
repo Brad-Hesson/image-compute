@@ -99,9 +99,11 @@ pub struct PlaneFitter {
     copy_image: ComputePipeline,
     copy_image_transpose: ComputePipeline,
     generate_sums_plane: ComputePipeline,
+    generate_sums_lines: ComputePipeline,
     reduce_image: ComputePipeline,
     reduce_image_lines: ComputePipeline,
     reduce_sums_plane: ComputePipeline,
+    reduce_sums_lines: ComputePipeline,
     subtract_plane: ComputePipeline,
     subtract_lines: ComputePipeline,
     qs: QuerySet,
@@ -114,9 +116,11 @@ impl PlaneFitter {
             copy_image: plane_fit::compute::create_copy_image_pipeline(device),
             copy_image_transpose: plane_fit::compute::create_copy_image_transpose_pipeline(device),
             generate_sums_plane: plane_fit::compute::create_generate_sums_plane_pipeline(device),
+            generate_sums_lines: plane_fit::compute::create_generate_sums_lines_pipeline(device),
             reduce_image: plane_fit::compute::create_reduce_image_pipeline(device),
             reduce_image_lines: plane_fit::compute::create_reduce_image_lines_pipeline(device),
             reduce_sums_plane: plane_fit::compute::create_reduce_sums_plane_pipeline(device),
+            reduce_sums_lines: plane_fit::compute::create_reduce_sums_lines_pipeline(device),
             subtract_plane: plane_fit::compute::create_subtract_plane_pipeline(device),
             subtract_lines: plane_fit::compute::create_subtract_lines_pipeline(device),
             qs: device.create_query_set(&QuerySetDescriptor {
@@ -190,6 +194,16 @@ impl PlaneFitter {
         wts(pass);
 
         pass.set_pipeline(&self.reduce_image_lines);
+        wts(pass);
+        dispatch_y_reduction(pass, scratch_buffers.size);
+        wts(pass);
+
+        pass.set_pipeline(&self.generate_sums_lines);
+        wts(pass);
+        dispatch_linear(pass, scratch_buffers.size);
+        wts(pass);
+
+        pass.set_pipeline(&self.reduce_sums_lines);
         wts(pass);
         dispatch_y_reduction(pass, scratch_buffers.size);
         wts(pass);
