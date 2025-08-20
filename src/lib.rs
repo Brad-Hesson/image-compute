@@ -481,13 +481,15 @@ mod tests {
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::from_default_env())
             .init();
-        info!("{:?}", wgpu::Instance::enabled_backend_features());
         let instance = wgpu::Instance::default();
         let adapter = smol::block_on(instance.request_adapter(&RequestAdapterOptions {
             power_preference: PowerPreference::HighPerformance,
             ..Default::default()
         }))
         .context("Adapter request failed")?;
+        info!("Backend: {}", adapter.get_info().backend.to_str());
+        info!("Adapter: {}", adapter.get_info().name);
+        info!("Driver: {} {}", adapter.get_info().driver, adapter.get_info().driver_info);
         let (dev, queue) = smol::block_on(adapter.request_device(&DeviceDescriptor {
             required_features: wgpu::Features {
                 features_wgpu: FeaturesWGPU::TIMESTAMP_QUERY_INSIDE_PASSES
