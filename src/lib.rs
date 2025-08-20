@@ -485,8 +485,7 @@ mod tests {
         let instance = wgpu::Instance::default();
         let adapter = smol::block_on(instance.request_adapter(&RequestAdapterOptions {
             power_preference: PowerPreference::HighPerformance,
-            force_fallback_adapter: true,
-            compatible_surface: None,
+            ..Default::default()
         }))
         .context("Adapter request failed")?;
         let (dev, queue) = smol::block_on(adapter.request_device(&DeviceDescriptor {
