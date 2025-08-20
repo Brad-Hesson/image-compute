@@ -68,7 +68,7 @@ fn reduce_image_lines(
     let sz = image_size.yx;
     let local_id = vec2(local_index % WGS_SQUARE, local_index / WGS_SQUARE);
     let col_read_idx = num_workgroups.y * local_id.y + workgroup_id.y;
-    if col_read_idx < image_size.y && global_id.x < image_size.x {
+    if col_read_idx < sz.y && global_id.x < sz.x {
         z_sum_wg[local_index] = meta_out[idx(sz, global_id.x, col_read_idx)];
     } else {
         z_sum_wg[local_index] = 0.;
@@ -149,7 +149,7 @@ fn reduce_sums_lines(
     let sz = image_size.yx;
     let local_id = vec2(local_index % WGS_SQUARE, local_index / WGS_SQUARE);
     let col_read_idx = num_workgroups.y * local_id.y + workgroup_id.y;
-    if col_read_idx < image_size.y && global_id.x < image_size.x {
+    if col_read_idx < sz.y && global_id.x < sz.x {
         xz_sum_wg[local_index] = xz[idx(sz, global_id.x, col_read_idx)];
     } else {
         xz_sum_wg[local_index] = 0.;

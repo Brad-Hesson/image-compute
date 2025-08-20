@@ -318,10 +318,10 @@ mod tests {
             for y in 0..HEIGHT {
                 for x in 0..WIDTH {
                     let dat = &mut data[y * WIDTH + x];
-                    // let (x, y) = (x as f32 / WIDTH as f32, y as f32 / HEIGHT as f32);
-                    // *dat = (x_slope / WIDTH as f32) * x + (y_slope / HEIGHT as f32) * y;
-                    // let val = x_slope * x + y_slope * y + offset;
-                    *dat = y as f32;
+                    let (x, y) = (x as f32 / WIDTH as f32, y as f32 / HEIGHT as f32);
+                    *dat = (x_slope / WIDTH as f32) * x + (y_slope / HEIGHT as f32) * y;
+                    let val = x_slope * x + y_slope * y + offset;
+                    // *dat = y as f32;
                     // mean += val as f64;
                 }
             }
@@ -330,14 +330,14 @@ mod tests {
         mean /= (WIDTH * HEIGHT) as f64;
         let image_out = StorageBuffer::<f32>::new(
             &device,
-            None,
+            Some("image_out"),
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
             WIDTH * HEIGHT,
             |_| {},
         );
         let meta_out = StorageBuffer::<f64>::new(
             &device,
-            None,
+            Some("meta_out"),
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
             WIDTH * HEIGHT,
             |_| {},
